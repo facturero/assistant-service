@@ -1,0 +1,42 @@
+# Ollama NO corre dentro del clúster: vive en el PC con la GPU (la RTX 4070
+# SUPER), que es otra máquina de la misma red. Este par Service + EndpointSlice
+# es la forma de darle un nombre DNS dentro de k8s a algo que está fuera.
+#
+# La gracia es que el Deployment del asistente sigue apuntando a
+# `http://ollama:11434/v1` y no se entera de nada. El día que Ollama se mueva de
+# máquina, o que se levante dentro del clúster, se cambia SOLO este archivo.
+#
+# Un Service sin `selector` no elige pods: las direcciones se las damos nosotros
+# abajo. Por eso no lleva `ExternalName`, que resolvería a un DNS y aquí lo que
+# hay es una IP fija.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama
+  labels:
+    app: ollama
+spec:
+  ports:
+    - name: http
+      port: 11434
+      targetPort: 11434
+      protocol: TCP
+---
+# La IP del PC con la GPU. Si ese equipo coge otra por DHCP, el asistente deja
+# de responder con un error de conexión: resérvala en el router o ponla fija.
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: ollama-1
+  labels:
+    # Esta etiqueta es la que ata el EndpointSlice a su Service. Sin ella el
+    # Service existe pero no apunta a ningún sitio.
+    kubernetes.io/service-name: ollama
+addressType: IPv4
+ports:
+  - name: http
+    port: 11434
+    protocol: TCP
+endpoints:
+  - addresses:
+      - "192.168.100.229"

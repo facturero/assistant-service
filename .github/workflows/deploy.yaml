@@ -1,0 +1,148 @@
+name: CI/CD Deploy to K3s
+
+on:
+  push:
+    branches: [ "master" ]
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # Los tests cubren el bucle del agente, el aislamiento entre empresas y la
+      # traduccion entre formatos. Si fallan, no hay imagen: son justo las
+      # partes donde un fallo no se ve hasta que ya esta en produccion.
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Set lowercase image name
+        run: echo "IMAGE_NAME=${GITHUB_REPOSITORY,,}/assistant-service" >> $GITHUB_ENV
+
+      - name: Login GitHub Container Registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ${REGISTRY} -u ${{ github.actor }} --password-stdin
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build & Push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          push: true
+
+  deploy:
+    needs: build
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set lowercase image name
+        run: echo "IMAGE_NAME=${GITHUB_REPOSITORY,,}/assistant-service" >> $GITHUB_ENV
+
+      - name: Install sops & age (AMD64)
+        run: |
+          if ! command -v sops &> /dev/null; then
+            SOPS_VERSION=$(curl -sI https://github.com/getsops/sops/releases/latest | grep -i location | grep -oP 'v\K[0-9.]+')
+            wget -O /tmp/sops "https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}/sops-v${SOPS_VERSION}.linux.amd64"
+            sudo mv /tmp/sops /usr/local/bin/sops
+            sudo chmod +x /usr/local/bin/sops
+          fi
+          if ! command -v age &> /dev/null; then
+            AGE_VERSION=$(curl -sI https://github.com/FiloSottile/age/releases/latest | grep -i location | grep -oP 'v\K[0-9.]+')
+            wget -O /tmp/age.tar.gz "https://github.com/FiloSottile/age/releases/latest/download/age-v${AGE_VERSION}-linux-amd64.tar.gz"
+            sudo tar -xzf /tmp/age.tar.gz -C /usr/local/bin --strip-components=1 age/age age/age-keygen
+            rm -f /tmp/age.tar.gz
+          fi
+
+      - name: Setup age decryption key
+        run: |
+          set -e
+          mkdir -p ~/.config/sops/age
+          echo "${{ secrets.SOPS_AGE_KEY }}" > ~/.config/sops/age/keys.txt
+          chmod 600 ~/.config/sops/age/keys.txt
+          if ! grep -q 'AGE-SECRET-KEY' ~/.config/sops/age/keys.txt; then
+            echo "ERROR: el secret SOPS_AGE_KEY no tiene formato de clave age valida" >&2
+            exit 1
+          fi
+
+      - name: Decrypt secrets and apply to K3s
+        run: |
+          set -e
+          sops -d --input-type dotenv --output-type dotenv config/secrets.production.enc > /tmp/.env
+
+          # Si sigue habiendo ENC[...] es que sops no descifro y estariamos a
+          # punto de meter basura cifrada como contrasena de la base.
+          if grep -q '^ENC\[' /tmp/.env; then
+            echo "ERROR: /tmp/.env aun contiene ENC[...] tras 'sops -d'. Abortando." >&2
+            rm -f /tmp/.env
+            exit 1
+          fi
+
+          set -a
+          source /tmp/.env
+          set +a
+          rm -f /tmp/.env
+
+          kubectl create secret generic assistant-db \
+            --from-literal=host="$DB_HOST" \
+            --from-literal=port="$DB_PORT" \
+            --from-literal=user="$DB_USER" \
+            --from-literal=password="$DB_PASSWORD" \
+            --from-literal=name="$DB_NAME" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          # Las tres claves van siempre, aunque esten vacias: el Deployment las
+          # lee como opcionales y el servicio solo exige la del proveedor
+          # elegido. Hoy se usa un modelo local y no hace falta ninguna.
+          kubectl create secret generic assistant-llm \
+            --from-literal=anthropic-api-key="${ANTHROPIC_API_KEY:-}" \
+            --from-literal=opencode-api-key="${OPENCODE_API_KEY:-}" \
+            --from-literal=openai-compat-api-key="${OPENAI_COMPAT_API_KEY:-}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Update image and deploy
+        run: |
+          set -e
+          export REGISTRY=${REGISTRY}
+          export IMAGE_NAME=${IMAGE_NAME}
+          export IMAGE_TAG=${{ github.sha }}
+          envsubst < k8s/deployment.yaml | kubectl apply -f -
+          kubectl apply -f k8s/service.yaml
+          # Ollama vive fuera del cluster, en el PC con la GPU. Este manifiesto
+          # le da un nombre DNS dentro de k8s para que el Deployment no tenga
+          # que conocer su IP. Si algun dia Ollama entra al cluster, se borra.
+          kubectl apply -f k8s/ollama-external.yaml
+          kubectl rollout status deployment assistant-service --timeout=180s

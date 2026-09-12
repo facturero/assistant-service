@@ -1,0 +1,122 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: assistant-service
+  labels:
+    app: assistant-service
+spec:
+  # Una réplica a propósito: el initContainer de migración se ejecuta por pod y
+  # sequelize-cli no toma ningún lock. Antes de escalar, mover la migración a un
+  # Job del pipeline (ver arquitectura/migraciones.md).
+  replicas: 1
+  selector:
+    matchLabels:
+      app: assistant-service
+  template:
+    metadata:
+      labels:
+        app: assistant-service
+    spec:
+      initContainers:
+        # El esquema se actualiza antes de que arranque el código nuevo, sin que
+        # nadie tenga que acordarse. Sin seeders: este servicio no siembra nada.
+        - name: assistant-migrate
+          image: ${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}
+          securityContext:
+            runAsUser: 0
+          command:
+            - sh
+            - -c
+            - "npx sequelize-cli db:migrate"
+          env:
+            - name: NODE_ENV
+              value: "production"
+            - name: DB_HOST
+              valueFrom: { secretKeyRef: { name: assistant-db, key: host } }
+            - name: DB_PORT
+              valueFrom: { secretKeyRef: { name: assistant-db, key: port } }
+            - name: DB_USER
+              valueFrom: { secretKeyRef: { name: assistant-db, key: user } }
+            - name: DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: assistant-db, key: password } }
+            - name: DB_NAME
+              valueFrom: { secretKeyRef: { name: assistant-db, key: name } }
+      containers:
+        - name: assistant-service
+          image: ${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}
+          ports:
+            - containerPort: 3014
+          env:
+            - name: NODE_ENV
+              value: "production"
+            - name: PORT
+              value: "3014"
+            - name: DB_HOST
+              valueFrom: { secretKeyRef: { name: assistant-db, key: host } }
+            - name: DB_PORT
+              valueFrom: { secretKeyRef: { name: assistant-db, key: port } }
+            - name: DB_USER
+              valueFrom: { secretKeyRef: { name: assistant-db, key: user } }
+            - name: DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: assistant-db, key: password } }
+            - name: DB_NAME
+              valueFrom: { secretKeyRef: { name: assistant-db, key: name } }
+            # De dónde sale el modelo. Hoy: 'openai-compat', que habla el
+            # formato de OpenAI y apunta a un modelo local. No cuesta dinero y
+            # no necesita credencial. Para pasar a Anthropic o a OpenCode Zen se
+            # cambia esto y se rellena su clave en config/secrets.production.env.
+            - name: ASSISTANT_PROVIDER
+              value: "openai-compat"
+            # Dónde escucha ese modelo. NO es un secreto, es una dirección de
+            # red, y por eso vive aquí y no en el .enc. Para 'openai-compat' la
+            # URL va CON /v1 y sin /chat/completions; para anthropic/opencode
+            # iría SIN /v1, que lo añade el SDK.
+            - name: ASSISTANT_BASE_URL
+              value: "http://ollama:11434/v1"
+            - name: ASSISTANT_MODEL
+              value: "gemma4:12b"
+            # Un modelo local tarda segundos, a veces minutos. El tope de espera
+            # por defecto se le queda corto.
+            - name: ASSISTANT_LLM_TIMEOUT_MS
+              value: "180000"
+            # Las claves de los proveedores de pago viven solo aquí, nunca en el
+            # frontend. Las tres van como opcionales porque el servicio solo
+            # exige la del proveedor elegido: hoy, ninguna.
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef: { name: assistant-llm, key: anthropic-api-key, optional: true }
+            - name: OPENCODE_API_KEY
+              valueFrom:
+                secretKeyRef: { name: assistant-llm, key: opencode-api-key, optional: true }
+            - name: OPENAI_COMPAT_API_KEY
+              valueFrom:
+                secretKeyRef: { name: assistant-llm, key: openai-compat-api-key, optional: true }
+            - name: ANTHROPIC_EFFORT
+              value: "medium"
+            # El asistente llama a la API por el gateway, con el token del
+            # usuario: así hereda sus permisos y su organización.
+            - name: GATEWAY_URL
+              value: "http://api-gateway-node:8080"
+            - name: ASSISTANT_MONTHLY_TOKEN_LIMIT
+              value: "2000000"
+            - name: CORS_ORIGIN
+              value: "https://crm.noahsolution.com"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "384Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3014
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3014
+            initialDelaySeconds: 5
+            periodSeconds: 10
