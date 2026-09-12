@@ -27,7 +27,12 @@ spec:
           command:
             - sh
             - -c
-            - "npx sequelize-cli db:migrate"
+            # `db:create` antes de `db:migrate`, y no solo migrar: el MySQL de
+            # producción no trae `assistant_db` de fábrica (mysql-basic no la
+            # crea), así que migrar a secas fallaba con "Unknown database" y el
+            # pod no llegaba a arrancar nunca. Si la base ya existe, `db:create`
+            # se queja y seguimos: por eso el `;` y no `&&`.
+            - "npx sequelize-cli db:create 2>/dev/null; npx sequelize-cli db:migrate"
           env:
             - name: NODE_ENV
               value: "production"
