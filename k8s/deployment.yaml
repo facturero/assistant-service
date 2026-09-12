@@ -80,10 +80,12 @@ spec:
               value: "http://ollama:11434/v1"
             - name: ASSISTANT_MODEL
               value: "gemma4:12b"
-            # Un modelo local tarda segundos, a veces minutos. El tope de espera
-            # por defecto se le queda corto.
+            # Un modelo local tarda segundos, a veces minutos; cuando está frío
+            # (primera carga de gemma4:12b en el PC) puede superar los 3 min del
+            # tope por defecto y el asistente responde 502. Triplicado a 9 min.
+            # SOLO aplica al proveedor openai-compat (Ollama): Claude no lo lee.
             - name: ASSISTANT_LLM_TIMEOUT_MS
-              value: "180000"
+              value: "540000"
             # Las claves de los proveedores de pago viven solo aquí, nunca en el
             # frontend. Las tres van como opcionales porque el servicio solo
             # exige la del proveedor elegido: hoy, ninguna.
