@@ -19,6 +19,24 @@
 
 export type ToolRisk = 'read' | 'write';
 
+/**
+ * El asistente **no factura**: puede consultar facturas para responder
+ * preguntas, pero nunca emitir, anular ni modificar una, ni tocar la parte
+ * fiscal (documentos electrónicos, certificados de firma). Una factura tiene
+ * efectos tributarios que no se deshacen con un clic, y es decisión de producto
+ * que eso lo haga siempre una persona desde la pantalla de facturación.
+ *
+ * Estas son las rutas de la API donde vive eso. Cualquier llamada que no sea
+ * GET a una de ellas se bloquea en `callTool`, y hay un test que falla si
+ * alguien añade al catálogo una herramienta de escritura que apunte aquí.
+ */
+export const BILLING_PATH_PREFIXES = ['/invoices', '/fiscal-invoices', '/certificates'];
+
+export function isBillingWrite(method: string, path: string): boolean {
+  if (method.toUpperCase() === 'GET') return false;
+  return BILLING_PATH_PREFIXES.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
+}
+
 export interface ToolDefinition {
   name: string;
   description: string;

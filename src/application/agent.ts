@@ -7,7 +7,7 @@ import {
   UnknownToolError,
   UsageLimitReachedError,
 } from '../domain/errors';
-import { summarizeAction, toAnthropicTools, TOOLS_BY_NAME, ToolDefinition } from '../domain/tools';
+import { isBillingWrite, summarizeAction, toAnthropicTools, TOOLS_BY_NAME, ToolDefinition } from '../domain/tools';
 import { CrmApiPort, LlmMessage, LlmPort } from './ports';
 import { buildSystemPrompt, OrganizationContext } from './prompt';
 
@@ -52,7 +52,8 @@ const WRITE_ANNOUNCEMENT_RE =
 const WRITE_PROMPT_AGAIN =
   'Corrección: anunciaste que ibas a realizar una acción pero no llamaste a ninguna herramienta. ' +
   'Si la petición requiere hacer algo (invitar, crear, dar de alta), llama a la herramienta ' +
-  'correspondiente en este mismo turno. No lo anuncies solo en texto.';
+  'correspondiente en este mismo turno. No lo anuncies solo en texto. Si no tienes ninguna ' +
+  'herramienta para eso (por ejemplo, emitir una factura), no la inventes: di que no puedes hacerlo.';
 
 function announcesWrite(text: string): boolean {
   return WRITE_ANNOUNCEMENT_RE.test(text);
@@ -331,6 +332,19 @@ export class Agent {
     input: Record<string, unknown>,
     ctx: TurnContext,
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    // Segunda barrera tras el catálogo: el asistente no factura. Ni siquiera con
+    // confirmación humana, así que no llega a la API.
+    if (isBillingWrite(tool.method, tool.path)) {
+      return {
+        ok: false,
+        status: 403,
+        body: {
+          code: 'ASSISTANT_CANNOT_INVOICE',
+          message: 'El asistente no puede emitir ni modificar facturas. Se hace desde [facturación](/invoices/new).',
+        },
+      };
+    }
+
     let path = tool.path;
     const body: Record<string, unknown> = {};
     const query: Record<string, string> = {};
