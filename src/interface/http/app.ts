@@ -69,7 +69,7 @@ export function createApp(opts: {
       '*',
       cors({
         origin: opts.corsOrigin.split(',').map((o) => o.trim()).filter(Boolean),
-        allowMethods: ['GET', 'POST', 'OPTIONS'],
+        allowMethods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
         allowHeaders: ['Content-Type', 'Authorization', 'X-Request-Id', 'Accept-Language'],
         credentials: true,
       }),
@@ -117,6 +117,20 @@ export function createApp(opts: {
         .filter((a) => a.isPending)
         .map((a) => ({ id: a.id, toolName: a.toolName, summary: a.summary, input: a.input })),
     });
+  });
+
+  /**
+   * Borrar un hilo. Es virtual: deja de listarse y de poder abrirse, pero la
+   * fila y su historial se quedan en la base. Borrar uno ajeno o inexistente da
+   * el mismo 404 que abrirlo.
+   */
+  app.delete('/assistant/conversations/:id', async (c) => {
+    const conversation = await opts.repos.conversations.findById(c.req.param('id'));
+    if (!conversation || !conversation.belongsTo(c.get('organizationId'), c.get('userId'))) {
+      return c.json({ code: 'CONVERSATION_NOT_FOUND', message: 'La conversación no existe.' }, 404);
+    }
+    await opts.repos.conversations.softDelete(conversation.id);
+    return c.body(null, 204);
   });
 
   /** Mandar un mensaje: arranca o continúa el hilo. */

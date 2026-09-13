@@ -23,6 +23,9 @@ export function currentWindow(now = new Date()): string {
 class SequelizeConversationRepository implements ConversationRepository {
   async save(conversation: Conversation): Promise<void> {
     const p = conversation.toJSON();
+    // `deleted_at` no va en el upsert a propósito: un turno que sigue en marcha
+    // guarda el hilo al terminar, y si lo reescribiera resucitaría una
+    // conversación que el usuario borró mientras tanto. Solo `softDelete` la toca.
     await ConversationModel.upsert({
       id: p.id,
       organizationId: p.organizationId,
@@ -33,14 +36,20 @@ class SequelizeConversationRepository implements ConversationRepository {
     });
   }
 
+  async softDelete(id: string): Promise<void> {
+    await ConversationModel.update({ deletedAt: new Date() }, { where: { id, deletedAt: null } });
+  }
+
+  // Las borradas no salen de aquí: para el resto del servicio, un hilo borrado
+  // es un hilo que no existe (ni se lista, ni se abre, ni se continúa).
   async findById(id: string): Promise<Conversation | null> {
-    const row = await ConversationModel.findByPk(id);
+    const row = await ConversationModel.findOne({ where: { id, deletedAt: null } });
     return row ? toConversation(row) : null;
   }
 
   async listByUser(organizationId: string, userId: string, limit: number): Promise<Conversation[]> {
     const rows = await ConversationModel.findAll({
-      where: { organizationId, userId },
+      where: { organizationId, userId, deletedAt: null },
       order: [['updated_at', 'DESC']],
       limit,
     });
@@ -178,6 +187,7 @@ function toConversation(row: ConversationModel): Conversation {
     title: (v.title as string | null) ?? null,
     createdAt: v.createdAt as Date,
     updatedAt: v.updatedAt as Date,
+    deletedAt: (v.deletedAt as Date | null) ?? null,
   });
 }
 

@@ -12,6 +12,7 @@ export function initModels(sequelize: Sequelize): void {
       organizationId: { type: DataTypes.CHAR(36), allowNull: false, field: 'organization_id' },
       userId: { type: DataTypes.CHAR(36), allowNull: false, field: 'user_id' },
       title: { type: DataTypes.STRING(200), allowNull: true },
+      deletedAt: { type: DataTypes.DATE, allowNull: true, field: 'deleted_at' },
     },
     { sequelize, tableName: 'conversations', underscored: true, timestamps: true },
   );

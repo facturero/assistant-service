@@ -17,6 +17,7 @@ export interface ConversationProps {
   title: string | null;
   createdAt: Date;
   updatedAt: Date;
+  deletedAt: Date | null;
 }
 
 export class Conversation {
@@ -31,6 +32,7 @@ export class Conversation {
       title: params.title ?? null,
       createdAt: now,
       updatedAt: now,
+      deletedAt: null,
     });
   }
 
@@ -44,6 +46,8 @@ export class Conversation {
   get title(): string | null { return this.props.title; }
   get createdAt(): Date { return this.props.createdAt; }
   get updatedAt(): Date { return this.props.updatedAt; }
+  get deletedAt(): Date | null { return this.props.deletedAt; }
+  get isDeleted(): boolean { return this.props.deletedAt !== null; }
 
   /**
    * El título sale de la primera frase del usuario, recortada. Nada de pedirle

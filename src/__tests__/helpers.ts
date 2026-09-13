@@ -18,15 +18,28 @@ export function createInMemoryRepositories(): Repositories & {
     __actions: actions,
     conversations: {
       async save(conversation) {
-        conversations.set(conversation.id, conversation);
+        // Igual que el upsert real: guardar no toca `deletedAt`.
+        const existing = conversations.get(conversation.id);
+        conversations.set(
+          conversation.id,
+          existing?.isDeleted
+            ? Conversation.fromPersistence({ ...conversation.toJSON(), deletedAt: existing.deletedAt })
+            : conversation,
+        );
       },
       async findById(id) {
-        return conversations.get(id) ?? null;
+        const conversation = conversations.get(id);
+        return conversation && !conversation.isDeleted ? conversation : null;
       },
       async listByUser(organizationId, userId, limit) {
         return [...conversations.values()]
-          .filter((c) => c.belongsTo(organizationId, userId))
+          .filter((c) => c.belongsTo(organizationId, userId) && !c.isDeleted)
           .slice(0, limit);
+      },
+      async softDelete(id) {
+        const conversation = conversations.get(id);
+        if (!conversation || conversation.isDeleted) return;
+        conversations.set(id, Conversation.fromPersistence({ ...conversation.toJSON(), deletedAt: new Date() }));
       },
     },
     messages: {
