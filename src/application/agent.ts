@@ -37,6 +37,28 @@ export interface AgentOptions {
 }
 
 /**
+ * Reintentos de la red de seguridad para escrituras "anunciadas en texto".
+ * Un modelo pequeño a veces escribe "Voy a invitar a X" sin emitir la llamada;
+ * antes dábamos el turno por cerrado y la acción por hecha. Ahora se le da otra
+ * vuelta con una corrección, pero acotada: a la tercera caída se cierra con lo
+ * que dijo, porque tampoco se puede girar en un bucle infinito pagando tokens.
+ */
+const MAX_WRITE_RETRIES = 2;
+
+/** Rastros de que el modelo prometió una escritura en prosa, sin tool_use. */
+const WRITE_ANNOUNCEMENT_RE =
+  /\b(?:voy\s+a|vamos\s+a|me dispongo\s+a|procederé\s+a|te voy\s+a)\s+(?:a\s+)?(?:invitar|crear|dar\s+de\s+alta|actualizar)\b/i;
+
+const WRITE_PROMPT_AGAIN =
+  'Corrección: anunciaste que ibas a realizar una acción pero no llamaste a ninguna herramienta. ' +
+  'Si la petición requiere hacer algo (invitar, crear, dar de alta), llama a la herramienta ' +
+  'correspondiente en este mismo turno. No lo anuncies solo en texto.';
+
+function announcesWrite(text: string): boolean {
+  return WRITE_ANNOUNCEMENT_RE.test(text);
+}
+
+/**
  * El bucle del agente.
  *
  * Es un bucle manual y no el ayudante del SDK por una razón concreta: aquí el
@@ -182,11 +204,22 @@ export class Agent {
     const system = buildSystemPrompt(ctx.organization);
     const tools = toAnthropicTools();
 
+    // La corrección se inyecta a la llamada siguiente y se reemplaza cada vuelta.
+    // No viaja en el historial: es un empujón a la iteración, no un mensaje del
+    // usuario que luego se reenvíe para siempre.
+    let correction: string | null = null;
+    let corrections = 0;
+
     for (let iteration = 0; iteration < this.options.maxIterations; iteration++) {
       const history = await this.repos.messages.listByConversation(conversation.id);
+      const messages = history.map(toLlmMessage);
+      if (correction) {
+        messages.push({ role: 'user', content: [{ type: 'text', text: correction }] });
+        correction = null;
+      }
       const turn = await this.llm.complete({
         system,
-        messages: history.map(toLlmMessage),
+        messages,
         tools,
       });
 
@@ -223,6 +256,15 @@ export class Agent {
 
       const toolUses = turn.content.filter((b) => b.type === 'tool_use');
       if (toolUses.length === 0) {
+        // El modelo a veces anuncia una escritura en prosa ("Voy a invitar a X")
+        // sin emitir la llamada. Para una respuesta normal es el fin del turno,
+        // pero si el texto promete una escritura, se da otra vuelta con la
+        // corrección en vez de dar la acción por hecha.
+        if (corrections < MAX_WRITE_RETRIES && announcesWrite(assistantMessage.text)) {
+          correction = WRITE_PROMPT_AGAIN;
+          corrections += 1;
+          continue;
+        }
         return {
           conversationId: conversation.id,
           reply: assistantMessage.text,

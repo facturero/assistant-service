@@ -148,6 +148,68 @@ describe('Agent — lecturas', () => {
 });
 
 describe('Agent — escrituras con confirmación', () => {
+  it('si el modelo anuncia una escritura en prosa sin tool_use, se corrige y propone', async () => {
+    const repos = createInMemoryRepositories();
+    const crm = new FakeCrmApi();
+    const llm = new ScriptedLlm([
+      // Turno 1: anuncia con texto, sin llamada. El loop debe darse cuenta e
+      // inyectar la corrección; el turno 2 es la respuesta corregida.
+      { content: [textBlock('Voy a invitar a mariamagdalena@gmail.com con el rol de Administrador.')] },
+      {
+        content: [toolUseBlock('tu_2', 'invitar_empleado', { email: 'mariamagdalena@gmail.com', roleIds: ['r1'] })],
+        stopReason: 'tool_use',
+      },
+    ]);
+
+    const result = await new Agent(repos, llm, crm, options).startOrContinue({
+      conversationId: null,
+      text: 'invita a mariamagdalena@gmail.com con rol admin',
+      ctx,
+    });
+
+    expect(llm.calls).toHaveLength(2);
+    expect(crm.calls).toHaveLength(0);
+    expect(result.pendingActions).toHaveLength(1);
+    // La corrección viajó en la llamada intermedia, no en el historial.
+    expect(JSON.stringify(llm.calls[1].messages)).toContain('Corrección');
+    expect(JSON.stringify(repos.__messages)).not.toContain('Corrección');
+  });
+
+  it('la corrección se reintenta hasta MAX_WRITE_RETRIES y luego cierra', async () => {
+    const repos = createInMemoryRepositories();
+    const crm = new FakeCrmApi();
+    // Tres turnos textuales: el total de llamadas al modelo = 1 + MAX_WRITE_RETRIES.
+    const llm = new ScriptedLlm([
+      { content: [textBlock('Voy a crear ese rol.')] },
+      { content: [textBlock('Voy a crear ese rol.')] },
+      { content: [textBlock('Voy a crear ese rol.')] },
+    ]);
+
+    const result = await new Agent(repos, llm, crm, options).startOrContinue({
+      conversationId: null,
+      text: 'crea un rol',
+      ctx,
+    });
+
+    expect(llm.calls).toHaveLength(3);
+    expect(result.pendingActions).toHaveLength(0);
+    expect(result.reply).toContain('Voy a crear');
+  });
+
+  it('una respuesta que no anuncia escrituras no dispara correccion', async () => {
+    const repos = createInMemoryRepositories();
+    const crm = new FakeCrmApi();
+    const llm = new ScriptedLlm([{ content: [textBlock('Puedo generar reportes de facturacion.')] }]);
+
+    await new Agent(repos, llm, crm, options).startOrContinue({
+      conversationId: null,
+      text: 'puedes hacer reportes?',
+      ctx,
+    });
+
+    expect(llm.calls).toHaveLength(1);
+  });
+
   it('no ejecuta una escritura: la propone y para', async () => {
     const repos = createInMemoryRepositories();
     const crm = new FakeCrmApi();
