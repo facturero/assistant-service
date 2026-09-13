@@ -81,7 +81,10 @@ class SequelizeMessageRepository implements MessageRepository {
         inputTokens: Number(v.inputTokens ?? 0),
         outputTokens: Number(v.outputTokens ?? 0),
         cacheReadTokens: Number(v.cacheReadTokens ?? 0),
-        createdAt: v.createdAt as Date,
+        // Se lee `created_at` y no `createdAt`: con `underscored: true` y el
+        // alias `createdAt: 'created_at'`, Sequelize expone la columna con el
+        // nombre del campo físico, no el del atributo.
+        createdAt: v.created_at as Date,
       });
     });
   }
