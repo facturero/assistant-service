@@ -1,8 +1,12 @@
+import { randomUUID } from 'node:crypto';
 import { Sequelize } from 'sequelize';
+import { withActor } from '@facturero/outbox-relay';
 import { Conversation, Message, PendingAction } from '../../domain/entities';
 import {
+  AuditEvent,
   ConversationRepository,
   MessageRepository,
+  OutboxRepository,
   PendingActionRepository,
   Repositories,
   UsageRepository,
@@ -11,6 +15,7 @@ import {
 import {
   ConversationModel,
   MessageModel,
+  OutboxModel,
   PendingActionModel,
   UsageCounterModel,
 } from './models';
@@ -208,8 +213,24 @@ function toAction(row: PendingActionModel): PendingAction {
   });
 }
 
+/** Deja el evento en la tabla outbox; `withActor` le añade quién lo hizo desde el contexto de la petición. */
+class SequelizeOutboxRepository implements OutboxRepository {
+  async add(event: AuditEvent): Promise<void> {
+    await OutboxModel.create({
+      id: randomUUID(),
+      aggregateType: event.aggregateType,
+      aggregateId: event.aggregateId,
+      type: event.type,
+      payload: withActor(event.payload),
+      occurredAt: event.occurredAt,
+      processedAt: null,
+    });
+  }
+}
+
 export function createRepositories(sequelize: Sequelize): Repositories {
   return {
+    outbox: new SequelizeOutboxRepository(),
     conversations: new SequelizeConversationRepository(),
     messages: new SequelizeMessageRepository(),
     actions: new SequelizePendingActionRepository(),

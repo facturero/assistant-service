@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { runWithActor } from '@facturero/outbox-relay';
 import { cors } from 'hono/cors';
 import { z } from 'zod';
 import { Agent, TurnContext } from '../../application/agent';
@@ -52,7 +53,16 @@ function requireContext() {
     c.set('userId', userId);
     c.set('bearerToken', bearer);
     c.set('locale', (c.req.header('Accept-Language') ?? 'es').slice(0, 2));
-    await next();
+    // Quién actúa viaja hasta el outbox: los eventos de auditoría de esta petición llevan usuario, correo e IP.
+    await runWithActor(
+      {
+        actorId: userId,
+        actorEmail: c.req.header('X-User-Email') ?? null,
+        actorIp: c.req.header('X-Client-Ip') ?? null,
+        requestId: c.req.header('X-Request-Id') ?? null,
+      },
+      () => next(),
+    );
   };
 }
 
@@ -130,6 +140,16 @@ export function createApp(opts: {
       return c.json({ code: 'CONVERSATION_NOT_FOUND', message: 'La conversación no existe.' }, 404);
     }
     await opts.repos.conversations.softDelete(conversation.id);
+    // El borrado es virtual (el historial se queda), pero quién lo ocultó y cuándo también es rastro.
+    await opts.repos.outbox
+      ?.add({
+        type: 'assistant.conversation.deleted',
+        aggregateType: 'assistant_conversation',
+        aggregateId: conversation.id,
+        payload: { targetId: conversation.id, organizationId: conversation.organizationId, actorId: c.get('userId') },
+        occurredAt: new Date(),
+      })
+      .catch((err: unknown) => console.error('[assistant] no se pudo registrar el borrado en la bitácora:', err));
     return c.body(null, 204);
   });
 

@@ -68,6 +68,17 @@ function announcesWrite(text: string): boolean {
  * minutos después, cuando una persona confirma desde el navegador. Un bucle en
  * memoria no sobrevive a esa espera.
  */
+/**
+ * Tipos de evento de auditoría del asistente. Prefijo `assistant.`: el gateway no lo escucha, así que no mueve
+ * permisos ni campanas. Los payloads llevan qué herramienta y el resumen que la persona leyó, no el resultado del CRM
+ * (puede traer datos de clientes) ni las respuestas del modelo.
+ */
+export type AssistantAuditType =
+  | 'assistant.action.proposed'
+  | 'assistant.action.executed'
+  | 'assistant.action.failed'
+  | 'assistant.action.rejected';
+
 export class Agent {
   constructor(
     private readonly repos: Repositories,
@@ -75,6 +86,39 @@ export class Agent {
     private readonly crm: CrmApiPort,
     private readonly options: AgentOptions,
   ) {}
+
+  /**
+   * Deja constancia en la bitácora. Un fallo aquí NO debe romper la conversación (la persona ya pidió o confirmó algo):
+   * se anota en el log y el turno sigue.
+   */
+  private async audit(
+    type: AssistantAuditType,
+    ctx: TurnContext,
+    action: PendingAction,
+    conversationId: string,
+    extra: Record<string, unknown> = {},
+  ): Promise<void> {
+    if (!this.repos.outbox) return;
+    try {
+      await this.repos.outbox.add({
+        type,
+        aggregateType: 'assistant_action',
+        aggregateId: action.id,
+        payload: {
+          targetId: action.id,
+          organizationId: ctx.organizationId,
+          actorId: ctx.userId,
+          conversationId,
+          toolName: action.toolName,
+          summary: action.summary,
+          ...extra,
+        },
+        occurredAt: new Date(),
+      });
+    } catch (err) {
+      console.error(`[assistant] no se pudo registrar ${type} en la bitácora:`, err);
+    }
+  }
 
   async startOrContinue(params: {
     conversationId: string | null;
@@ -127,6 +171,7 @@ export class Agent {
     if (!params.approve) {
       action.markRejected(params.ctx.userId);
       await this.repos.actions.save(action);
+      await this.audit('assistant.action.rejected', params.ctx, action, conversation.id);
     } else {
       const tool = TOOLS_BY_NAME.get(action.toolName);
       if (!tool) throw new UnknownToolError(action.toolName);
@@ -137,6 +182,14 @@ export class Agent {
         action.markFailed(response.body, params.ctx.userId);
       }
       await this.repos.actions.save(action);
+      await this.audit(
+        response.ok ? 'assistant.action.executed' : 'assistant.action.failed',
+        params.ctx,
+        action,
+        conversation.id,
+        // Solo el código HTTP del CRM; el cuerpo de la respuesta puede traer datos de la empresa.
+        { httpStatus: response.status },
+      );
     }
 
     const stillPending = (await this.repos.actions.listByConversation(conversation.id)).filter(
@@ -290,6 +343,7 @@ export class Agent {
             summary: summarizeAction(tool, input),
           });
           await this.repos.actions.save(action);
+          await this.audit('assistant.action.proposed', ctx, action, conversation.id);
           proposed.push(action);
         }
         return {

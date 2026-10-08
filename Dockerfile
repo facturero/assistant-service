@@ -1,16 +1,19 @@
 FROM node:20-alpine AS builder
+
+ARG NODE_AUTH_TOKEN
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci
+RUN printf '@facturero:registry=https://npm.pkg.github.com\n//npm.pkg.github.com/:_authToken=%s\n' "$NODE_AUTH_TOKEN" > .npmrc && npm ci && rm -f .npmrc
 COPY tsconfig.json ./
 COPY src/ src/
 RUN npm run build
 
 FROM node:20-alpine
+ARG NODE_AUTH_TOKEN
 WORKDIR /app
 RUN addgroup --system app && adduser --system --ingroup app app
 COPY package*.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+RUN printf '@facturero:registry=https://npm.pkg.github.com\n//npm.pkg.github.com/:_authToken=%s\n' "$NODE_AUTH_TOKEN" > .npmrc && npm ci --omit=dev && rm -f .npmrc && npm cache clean --force
 COPY --from=builder /app/dist/ dist/
 # Las migraciones y su configuración viajan en la imagen: el initContainer del
 # Deployment las ejecuta con esta misma imagen antes de que arranque el servicio

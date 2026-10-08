@@ -22,7 +22,8 @@ spec:
       targetPort: 11434
       protocol: TCP
 ---
-# La IP del PC con la GPU. Si ese equipo coge otra por DHCP, el asistente deja
+# La IP del equipo con Ollama (hoy 192.168.100.128; antes decía .127 y era un error:
+# ahí no escuchaba nada). Si ese equipo coge otra por DHCP, el asistente deja
 # de responder con un error de conexión: resérvala en el router o ponla fija.
 apiVersion: discovery.k8s.io/v1
 kind: EndpointSlice
@@ -39,4 +40,4 @@ ports:
     protocol: TCP
 endpoints:
   - addresses:
-      - "192.168.100.127"
+      - "192.168.100.128"

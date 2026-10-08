@@ -4,6 +4,7 @@ export class ConversationModel extends Model {}
 export class MessageModel extends Model {}
 export class PendingActionModel extends Model {}
 export class UsageCounterModel extends Model {}
+export class OutboxModel extends Model {}
 
 export function initModels(sequelize: Sequelize): void {
   ConversationModel.init(
@@ -80,5 +81,18 @@ export function initModels(sequelize: Sequelize): void {
       createdAt: false,
       updatedAt: 'updated_at',
     },
+  );
+
+  OutboxModel.init(
+    {
+      id: { type: DataTypes.CHAR(36), primaryKey: true },
+      aggregateType: { type: DataTypes.STRING(50), allowNull: false, field: 'aggregate_type' },
+      aggregateId: { type: DataTypes.CHAR(36), allowNull: false, field: 'aggregate_id' },
+      type: { type: DataTypes.STRING(100), allowNull: false },
+      payload: { type: DataTypes.JSON, allowNull: false },
+      occurredAt: { type: DataTypes.DATE, allowNull: false, field: 'occurred_at' },
+      processedAt: { type: DataTypes.DATE, allowNull: true, field: 'processed_at' },
+    },
+    { sequelize, tableName: 'outbox_messages', underscored: true, timestamps: false },
   );
 }

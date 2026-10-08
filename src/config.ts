@@ -69,6 +69,8 @@ const envSchema = z.object({
 
   /** El asistente llama a la API por el gateway, con el token del usuario. */
   GATEWAY_URL: z.string().default('http://api-gateway-node:8080'),
+  /** Sin esto el relay no arranca: los eventos de auditoría se acumulan en outbox_messages hasta que se configure. */
+  RABBITMQ_URL: z.string().optional(),
   CRM_API_TIMEOUT_MS: z.coerce.number().default(20000),
 
   /** Tope de vueltas del bucle antes de rendirse. */

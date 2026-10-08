@@ -1,21 +1,30 @@
 import { Conversation, ContentBlock, Message, PendingAction } from '../domain/entities';
-import { Repositories, UsageSnapshot } from '../domain/repositories';
+import { AuditEvent, Repositories, UsageSnapshot } from '../domain/repositories';
 import { CrmApiPort, LlmPort, LlmTurn } from '../application/ports';
 
 export function createInMemoryRepositories(): Repositories & {
   __conversations: Map<string, Conversation>;
   __messages: Message[];
   __actions: Map<string, PendingAction>;
+  /** Lo que se habria publicado en la bitacora de auditoria. */
+  __events: AuditEvent[];
 } {
   const conversations = new Map<string, Conversation>();
   const messages: Message[] = [];
   const actions = new Map<string, PendingAction>();
   const usage = new Map<string, UsageSnapshot>();
+  const events: AuditEvent[] = [];
 
   return {
     __conversations: conversations,
     __messages: messages,
     __actions: actions,
+    __events: events,
+    outbox: {
+      async add(event) {
+        events.push(event);
+      },
+    },
     conversations: {
       async save(conversation) {
         // Igual que el upsert real: guardar no toca `deletedAt`.

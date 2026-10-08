@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { serve } from '@hono/node-server';
 import { Sequelize } from 'sequelize';
+import { OutboxRelay } from '@facturero/outbox-relay';
 import { loadConfig, resolveProvider } from './config.js';
 import { Agent } from './application/agent.js';
 import { ClaudeLlm } from './infrastructure/anthropic/claude-llm.js';
@@ -51,6 +52,16 @@ async function main(): Promise<void> {
     monthlyTokenLimit: config.ASSISTANT_MONTHLY_TOKEN_LIMIT,
   });
 
+  // Publica la bitácora de auditoría (lo que el asistente propone y lo que se confirma o rechaza).
+  let relay: OutboxRelay | undefined;
+  if (config.RABBITMQ_URL) {
+    relay = new OutboxRelay({ sequelize, rabbitmqUrl: config.RABBITMQ_URL, exchange: 'crm.events' });
+    await relay.start();
+    console.log('[assistant-service] OutboxRelay iniciado.');
+  } else {
+    console.log('[assistant-service] RABBITMQ_URL no configurado: la auditoría queda en outbox_messages sin publicar.');
+  }
+
   const app = createApp({ agent, repos, crm, corsOrigin: config.CORS_ORIGIN });
   serve({ fetch: app.fetch, port: config.PORT });
 
@@ -63,6 +74,7 @@ async function main(): Promise<void> {
 
   const shutdown = async () => {
     console.log('[assistant-service] cerrando...');
+    await relay?.stop();
     await sequelize.close();
     process.exit(0);
   };

@@ -36,9 +36,24 @@ export interface UsageRepository {
   add(organizationId: string, delta: UsageSnapshot): Promise<void>;
 }
 
+/** Evento para la bitácora de auditoría (patrón outbox: un relay lo publica a RabbitMQ). */
+export interface AuditEvent {
+  type: string;
+  aggregateType: string;
+  aggregateId: string;
+  payload: Record<string, unknown>;
+  occurredAt: Date;
+}
+
+export interface OutboxRepository {
+  add(event: AuditEvent): Promise<void>;
+}
+
 export interface Repositories {
   conversations: ConversationRepository;
   messages: MessageRepository;
   actions: PendingActionRepository;
   usage: UsageRepository;
+  /** Opcional: sin RabbitMQ el servicio sigue funcionando y simplemente no audita. */
+  outbox?: OutboxRepository;
 }
