@@ -1,6 +1,8 @@
 import { Hono } from 'hono';
 import { runWithActor } from '@facturero/outbox-relay';
 import { cors } from 'hono/cors';
+import { httpInstrumentationMiddleware } from '@hono/otel';
+import { trace } from '@opentelemetry/api';
 import { z } from 'zod';
 import { Agent, TurnContext } from '../../application/agent';
 import { Repositories } from '../../domain/repositories';
@@ -73,6 +75,27 @@ export function createApp(opts: {
   corsOrigin: string;
 }): Hono<Vars> {
   const app = new Hono<Vars>();
+
+  if (process.env.OTEL_EXPORTER_OTLP_ENDPOINT) {
+    app.use('*', httpInstrumentationMiddleware({
+      serviceName: process.env.OTEL_SERVICE_NAME ?? 'assistant-service',
+      captureRequestHeaders: ['x-request-id'],
+      // Sin `spanNameFactory` a propósito: el nombre por defecto usa la plantilla de ruta (/x/:id). Con el path real
+      // cada recurso sería un nombre de span distinto y SigNoz no podría agrupar nada.
+    }));
+  }
+  // Quién hizo la petición, en el span de servidor. Mismos nombres que usa el frontend (app.org_id / app.user_id): con ellos
+  // se filtra una organización o una persona de punta a punta, del navegador al servicio. Los pone el gateway (JWT), no el cliente.
+  app.use('*', async (c, next) => {
+    const span = trace.getActiveSpan();
+    if (span) {
+      const org = c.req.header('x-organization-id');
+      const user = c.req.header('x-user-id');
+      if (org) span.setAttribute('app.org_id', org);
+      if (user) span.setAttribute('app.user_id', user);
+    }
+    await next();
+  });
 
   if (opts.corsOrigin) {
     app.use(
@@ -186,6 +209,12 @@ export function createApp(opts: {
 
   app.onError((err, c) => {
     if (err instanceof DomainError) {
+      if (err.status < 500) {
+      // `@hono/otel` marca como error del span (y registra la excepción) todo lo que llegue a `onError`, incluso un 404 o una
+      // validación fallida. Eso llenaría la pestaña Exceptions y la tasa de errores de SigNoz con respuestas NORMALES de negocio.
+      // Se limpia aquí: en el servidor solo los 5xx son errores. El 4xx que ve la persona queda marcado en la traza del navegador.
+        c.error = undefined;
+      }
       return c.json({ code: err.code, message: err.message }, err.status as 400);
     }
     console.error('[assistant-service] error no controlado:', err);

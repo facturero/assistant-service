@@ -115,6 +115,10 @@ spec:
               value: "2000000"
             - name: CORS_ORIGIN
               value: "https://crm.noahsolution.com"
+            - name: OTEL_SERVICE_NAME
+              value: "assistant-service"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otel-collector.observability.svc.cluster.local:4318"
           resources:
             requests:
               memory: "128Mi"

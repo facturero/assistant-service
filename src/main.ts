@@ -1,3 +1,4 @@
+import './infrastructure/telemetry/otel.js';
 import 'dotenv/config';
 import { serve } from '@hono/node-server';
 import { Sequelize } from 'sequelize';
