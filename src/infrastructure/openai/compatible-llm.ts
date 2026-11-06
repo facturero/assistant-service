@@ -1,6 +1,7 @@
 import { ContentBlock } from '../../domain/entities';
 import { AssistantUnavailableError } from '../../domain/errors';
-import { LlmMessage, LlmPort, LlmTurn } from '../../application/ports';
+import { LlmMessage, LlmPort, LlmTurn, StructuredLlmPort } from '../../application/ports';
+import { parseJsonReply } from '../../application/json-reply';
 
 export interface OpenAiCompatibleOptions {
   /** Raíz de la API, sin `/chat/completions`. Ej: `http://ollama:11434/v1`. */
@@ -28,7 +29,7 @@ export interface OpenAiCompatibleOptions {
  * parece: no hay caché de prompt. El prefijo entero se paga en cada llamada.
  * En un modelo local da igual porque no se paga nada; en uno de pago, no.
  */
-export class OpenAiCompatibleLlm implements LlmPort {
+export class OpenAiCompatibleLlm implements LlmPort, StructuredLlmPort {
   constructor(private readonly options: OpenAiCompatibleOptions) {}
 
   async complete(params: {
@@ -64,6 +65,53 @@ export class OpenAiCompatibleLlm implements LlmPort {
         inputTokens: Number(respuesta.usage?.prompt_tokens ?? 0),
         outputTokens: Number(respuesta.usage?.completion_tokens ?? 0),
         // Este formato no tiene caché de prompt. Cero es el dato honesto.
+        cacheReadTokens: 0,
+      },
+    };
+  }
+
+  /**
+   * Respuesta con forma fija. `response_format` con `json_schema` lo entienden Ollama (≥ 0.5), Groq, Gemini y OpenRouter; uno
+   * que lo ignore devuelve texto libre y `parseJsonReply` intenta rescatar el JSON igualmente.
+   */
+  async generate(params: {
+    system: string;
+    prompt: string;
+    schema: Record<string, unknown>;
+  }): Promise<{ data: unknown; usage: LlmTurn['usage'] }> {
+    const pedir = () =>
+      this.post({
+        model: this.options.model,
+        // Un resumen o una lista de subtareas caben de sobra en 2.000 tokens. El tope importa más que el ahorro: si el modelo se
+        // desboca, corta en segundos y no en minutos.
+        max_tokens: Math.min(this.options.maxTokens, 2000),
+        // Sin razonamiento. gemma4 en Ollama «pensaba» hasta llenar su ventana de 4.096 tokens (finish_reason `length`) y
+        // devolvía `content` vacío tras 80 s; resumir texto ya escrito no lo necesita. Medido el 2026-11-06 con Ollama 0.32:
+        // `reasoning_effort: 'none'` lo apaga (21 tokens de salida); `think: false` no surte efecto por esta ruta.
+        reasoning_effort: 'none',
+        temperature: 0,
+        messages: [
+          { role: 'system', content: params.system },
+          { role: 'user', content: params.prompt },
+        ],
+        response_format: { type: 'json_schema', json_schema: { name: 'respuesta', strict: true, schema: params.schema } },
+      });
+    const contenido = (r: any) => r?.choices?.[0]?.message?.content;
+    const vacio = (t: unknown) => typeof t !== 'string' || !t.trim();
+
+    let respuesta = await pedir();
+    // Red de seguridad para un `content` vacío suelto (un proveedor que ignore `reasoning_effort`, por ejemplo). Un reintento lo
+    // cubre; dos vacíos seguidos ya son un fallo de verdad.
+    if (vacio(contenido(respuesta))) respuesta = await pedir();
+    const texto = contenido(respuesta);
+    if (vacio(texto)) {
+      throw new AssistantUnavailableError('el proveedor devolvió una respuesta vacía');
+    }
+    return {
+      data: parseJsonReply(texto),
+      usage: {
+        inputTokens: Number(respuesta.usage?.prompt_tokens ?? 0),
+        outputTokens: Number(respuesta.usage?.completion_tokens ?? 0),
         cacheReadTokens: 0,
       },
     };

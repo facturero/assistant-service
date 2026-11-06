@@ -8,6 +8,7 @@ import { Agent, TurnContext } from '../../application/agent';
 import { Repositories } from '../../domain/repositories';
 import { DomainError } from '../../domain/errors';
 import { CrmApiPort } from '../../application/ports';
+import { ProjectAiContext, ProjectAssistant } from '../../application/project-ai';
 
 interface Vars {
   Variables: {
@@ -24,6 +25,7 @@ const sendSchema = z.object({
 });
 
 const decideSchema = z.object({ approve: z.boolean() });
+const idSchema = z.string().uuid();
 
 /**
  * Contexto de la petición. Igual que el resto de servicios, este no valida JWT:
@@ -70,6 +72,7 @@ function requireContext() {
 
 export function createApp(opts: {
   agent: Agent;
+  projects: ProjectAssistant;
   repos: Repositories;
   crm: CrmApiPort;
   corsOrigin: string;
@@ -205,6 +208,34 @@ export function createApp(opts: {
       ctx: await buildTurnContext(c, opts.crm),
     });
     return c.json(result);
+  });
+
+  // ── IA de Proyectos: proponen, no escriben (ver application/project-ai.ts) ──────────────────────────────────────────────
+  // POST y no GET aunque no cambien nada: cada llamada gasta tokens, y un GET lo podría repetir un prefetch o una caché.
+  const projectCtx = (c: any): ProjectAiContext => ({
+    organizationId: c.get('organizationId'),
+    userId: c.get('userId'),
+    bearerToken: c.get('bearerToken'),
+    locale: c.get('locale'),
+  });
+  const invalidId = (c: any) => c.json({ code: 'VALIDATION_ERROR', message: 'Identificador inválido.' }, 400);
+
+  app.post('/assistant/projects/tasks/:taskId/summary', async (c) => {
+    const id = idSchema.safeParse(c.req.param('taskId'));
+    if (!id.success) return invalidId(c);
+    return c.json(await opts.projects.summarizeTask(id.data, projectCtx(c)));
+  });
+
+  app.post('/assistant/projects/tasks/:taskId/subtasks', async (c) => {
+    const id = idSchema.safeParse(c.req.param('taskId'));
+    if (!id.success) return invalidId(c);
+    return c.json(await opts.projects.suggestSubtasks(id.data, projectCtx(c)));
+  });
+
+  app.post('/assistant/projects/:projectId/status-draft', async (c) => {
+    const id = idSchema.safeParse(c.req.param('projectId'));
+    if (!id.success) return invalidId(c);
+    return c.json(await opts.projects.draftStatus(id.data, projectCtx(c)));
   });
 
   app.onError((err, c) => {

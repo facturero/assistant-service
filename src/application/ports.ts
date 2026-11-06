@@ -31,6 +31,23 @@ export interface LlmPort {
 }
 
 /**
+ * Una sola respuesta con forma fija (JSON que cumple `schema`), sin conversación ni herramientas: resumir una tarea, redactar
+ * el estado de un proyecto, proponer subtareas. Es otro puerto y no un modo de `complete` porque no comparte nada con el bucle
+ * del agente: no hay historial que guardar, ni turno que suspender, ni herramientas que ejecutar.
+ *
+ * Cada proveedor usa su mecanismo nativo (`output_config.format` en Anthropic, `response_format` en el formato de OpenAI) y no
+ * una herramienta forzada: los modelos nuevos de Anthropic rechazan `tool_choice` forzado con un 400.
+ */
+export interface StructuredLlmPort {
+  generate(params: {
+    system: string;
+    prompt: string;
+    /** JSON Schema de la respuesta. Todos los objetos con `additionalProperties: false` y todas sus claves en `required`. */
+    schema: Record<string, unknown>;
+  }): Promise<{ data: unknown; usage: LlmTurn['usage'] }>;
+}
+
+/**
  * La API del CRM vista desde el asistente. La implementación llama al gateway
  * con el JWT del usuario, que es lo que hace que los permisos y el aislamiento
  * por organización se apliquen solos.

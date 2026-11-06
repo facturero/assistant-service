@@ -14,7 +14,11 @@ import { join } from 'node:path';
  *
  * Es una revisión por heurística, no una prueba de comportamiento: no sustituye los tests del caso de uso.
  */
-const EXENTOS: Record<string, string> = {};
+const EXENTOS: Record<string, string> = {
+  // Lo único que escribe es el contador de tokens del mes. Resume y propone, no cambia nada de la empresa; lo que la persona
+  // decide aplicar (publicar el estado, crear subtareas) va por la API de Proyectos, y la bitácora la deja projects-service.
+  'project-ai': 'solo suma consumo de tokens; los cambios los audita projects-service',
+};
 
 const ESCRITURA_APLICACION =
   /\b(?:\w*[Rr]epo\w*|uow|repos)(?:\.\w+)*\.(?:save|create|delete|remove|destroy|upsert|bulkCreate|update|add)\(/;

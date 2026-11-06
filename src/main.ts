@@ -5,6 +5,7 @@ import { Sequelize } from 'sequelize';
 import { OutboxRelay } from '@facturero/outbox-relay';
 import { loadConfig, resolveProvider } from './config.js';
 import { Agent } from './application/agent.js';
+import { ProjectAssistant } from './application/project-ai.js';
 import { ClaudeLlm } from './infrastructure/anthropic/claude-llm.js';
 import { OpenAiCompatibleLlm } from './infrastructure/openai/compatible-llm.js';
 import { CrmApi } from './infrastructure/http/crm-api.js';
@@ -53,6 +54,9 @@ async function main(): Promise<void> {
     monthlyTokenLimit: config.ASSISTANT_MONTHLY_TOKEN_LIMIT,
   });
 
+  // Los botones de IA de Proyectos usan el mismo modelo y el mismo tope mensual que el chat.
+  const projects = new ProjectAssistant(repos, llm, crm, { monthlyTokenLimit: config.ASSISTANT_MONTHLY_TOKEN_LIMIT });
+
   // Publica la bitácora de auditoría (lo que el asistente propone y lo que se confirma o rechaza).
   let relay: OutboxRelay | undefined;
   if (config.RABBITMQ_URL) {
@@ -63,7 +67,7 @@ async function main(): Promise<void> {
     console.log('[assistant-service] RABBITMQ_URL no configurado: la auditoría queda en outbox_messages sin publicar.');
   }
 
-  const app = createApp({ agent, repos, crm, corsOrigin: config.CORS_ORIGIN });
+  const app = createApp({ agent, projects, repos, crm, corsOrigin: config.CORS_ORIGIN });
   serve({ fetch: app.fetch, port: config.PORT });
 
   // Decir por dónde sale el modelo evita la tarde entera depurando por qué la

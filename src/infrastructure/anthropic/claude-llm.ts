@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { LlmMessage, LlmPort, LlmTurn } from '../../application/ports';
+import { LlmMessage, LlmPort, LlmTurn, StructuredLlmPort } from '../../application/ports';
+import { parseJsonReply } from '../../application/json-reply';
 import { AssistantUnavailableError } from '../../domain/errors';
 
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
@@ -38,7 +39,7 @@ export interface ClaudeOptions {
  * si una pasarela los ignora, seguirá contestando, solo que más caro o con otra
  * profundidad. Se ve en `cache_read_input_tokens`.
  */
-export class ClaudeLlm implements LlmPort {
+export class ClaudeLlm implements LlmPort, StructuredLlmPort {
   private readonly client: Anthropic;
 
   constructor(private readonly options: ClaudeOptions) {
@@ -88,20 +89,62 @@ export class ClaudeLlm implements LlmPort {
         },
       };
     } catch (error) {
-      // Errores tipados del SDK, de más concreto a más general. Nada de mirar el
-      // texto del mensaje: eso se rompe en cuanto cambia una cadena.
-      if (error instanceof Anthropic.RateLimitError) {
-        throw new AssistantUnavailableError('hay demasiadas peticiones ahora mismo, prueba en un minuto');
-      }
-      if (error instanceof Anthropic.AuthenticationError) {
-        console.error('[assistant-service] credencial de Anthropic inválida');
-        throw new AssistantUnavailableError('la configuración del servicio no es válida');
-      }
-      if (error instanceof Anthropic.APIError) {
-        console.error('[assistant-service] error de la API de Anthropic:', error.status, error.message);
-        throw new AssistantUnavailableError('el proveedor devolvió un error');
-      }
-      throw error;
+      throw translateError(error);
     }
   }
+
+  /**
+   * Respuesta con forma fija (resúmenes y borradores de Proyectos). Esfuerzo `low` a propósito: resumir lo que ya está escrito no
+   * pide razonamiento profundo, y cada botón que pulse alguien es una llamada. Sin caché del prompt: el de sistema de estas
+   * peticiones es corto, por debajo del mínimo cacheable.
+   */
+  async generate(params: {
+    system: string;
+    prompt: string;
+    schema: Record<string, unknown>;
+  }): Promise<{ data: unknown; usage: LlmTurn['usage'] }> {
+    try {
+      const stream = this.client.messages.stream({
+        model: this.options.model,
+        max_tokens: this.options.maxTokens,
+        system: params.system,
+        output_config: { effort: 'low', format: { type: 'json_schema', schema: params.schema } },
+        messages: [{ role: 'user', content: params.prompt }],
+      });
+      const message = await stream.finalMessage();
+      if (message.stop_reason === 'refusal') {
+        throw new AssistantUnavailableError('el modelo no quiso responder a esta petición');
+      }
+      const text = message.content.map((b) => (b.type === 'text' ? b.text : '')).join('');
+      return {
+        data: parseJsonReply(text),
+        usage: {
+          inputTokens: message.usage.input_tokens ?? 0,
+          outputTokens: message.usage.output_tokens ?? 0,
+          cacheReadTokens: message.usage.cache_read_input_tokens ?? 0,
+        },
+      };
+    } catch (error) {
+      throw translateError(error);
+    }
+  }
+}
+
+/**
+ * Errores tipados del SDK, de más concreto a más general. Nada de mirar el texto del mensaje: eso se rompe en cuanto cambia una
+ * cadena. Lo que no es del SDK (un `AssistantUnavailableError` propio, un fallo de programación) sigue tal cual.
+ */
+function translateError(error: unknown): unknown {
+  if (error instanceof Anthropic.RateLimitError) {
+    return new AssistantUnavailableError('hay demasiadas peticiones ahora mismo, prueba en un minuto');
+  }
+  if (error instanceof Anthropic.AuthenticationError) {
+    console.error('[assistant-service] credencial de Anthropic inválida');
+    return new AssistantUnavailableError('la configuración del servicio no es válida');
+  }
+  if (error instanceof Anthropic.APIError) {
+    console.error('[assistant-service] error de la API de Anthropic:', error.status, error.message);
+    return new AssistantUnavailableError('el proveedor devolvió un error');
+  }
+  return error;
 }

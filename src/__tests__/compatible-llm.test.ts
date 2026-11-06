@@ -122,3 +122,35 @@ describe('OpenAiCompatibleLlm — de bloques del agente a OpenAI', () => {
     ]);
   });
 });
+
+describe('OpenAiCompatibleLlm — respuesta con forma fija', () => {
+  it('pide json_schema y lee el JSON aunque venga envuelto en ```json', async () => {
+    let pedido: any;
+    const r = await llm(
+      responder(
+        { choices: [{ message: { content: '```json\n{"summary":"ok"}\n```' } }], usage: { prompt_tokens: 7, completion_tokens: 3 } },
+        (b) => (pedido = b),
+      ),
+    ).generate({ system: 's', prompt: 'p', schema: { type: 'object' } });
+
+    expect(r.data).toEqual({ summary: 'ok' });
+    expect(r.usage).toMatchObject({ inputTokens: 7, outputTokens: 3 });
+    expect(pedido.response_format).toMatchObject({ type: 'json_schema', json_schema: { schema: { type: 'object' } } });
+    expect(pedido.tools).toBeUndefined();
+    // Sin razonamiento y con tope: gemma4 pensaba hasta llenar su ventana y devolvía vacío a los 80 s.
+    expect(pedido.reasoning_effort).toBe('none');
+    expect(pedido.max_tokens).toBe(2000);
+  });
+
+  it('un contenido vacío se reintenta una vez; dos seguidos son un 503', async () => {
+    const vacio = { choices: [{ message: { content: '' } }] };
+    const bien = { choices: [{ message: { content: '{"a":1}' } }] };
+    const una = vi.fn().mockResolvedValueOnce({ ok: true, status: 200, json: async () => vacio }).mockResolvedValueOnce({ ok: true, status: 200, json: async () => bien });
+    expect((await llm(una).generate({ system: 's', prompt: 'p', schema: {} })).data).toEqual({ a: 1 });
+    expect(una).toHaveBeenCalledTimes(2);
+
+    const siempre = vi.fn(async () => ({ ok: true, status: 200, json: async () => vacio }));
+    await expect(llm(siempre).generate({ system: 's', prompt: 'p', schema: {} })).rejects.toMatchObject({ status: 503 });
+    expect(siempre).toHaveBeenCalledTimes(2);
+  });
+});
