@@ -22,9 +22,10 @@ spec:
       targetPort: 11434
       protocol: TCP
 ---
-# La IP del equipo con Ollama (hoy 192.168.100.128; antes decía .127 y era un error:
-# ahí no escuchaba nada). Si ese equipo coge otra por DHCP, el asistente deja
-# de responder con un error de conexión: resérvala en el router o ponla fija.
+# La IP del equipo con Ollama (hoy 192.168.100.127). Ese equipo no tiene IP
+# reservada y el DHCP lo mueve entre .127 y .128: el 2026-11-10 el asistente
+# falló con EHOSTUNREACH porque esto decía .128 y el equipo había cogido la .127.
+# Resérvala en el router o ponla fija; si no, volverá a pasar.
 apiVersion: discovery.k8s.io/v1
 kind: EndpointSlice
 metadata:
@@ -40,4 +41,4 @@ ports:
     protocol: TCP
 endpoints:
   - addresses:
-      - "192.168.100.128"
+      - "192.168.100.127"
