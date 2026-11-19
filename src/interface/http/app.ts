@@ -20,12 +20,12 @@ interface Vars {
 }
 
 const sendSchema = z.object({
-  conversationId: z.string().uuid().nullish(),
+  conversationId: z.string().guid().nullish(),
   text: z.string().min(1, 'Escribe algo').max(4000, 'El mensaje es demasiado largo'),
 });
 
 const decideSchema = z.object({ approve: z.boolean() });
-const idSchema = z.string().uuid();
+const idSchema = z.string().guid();
 
 /**
  * Contexto de la petición. Igual que el resto de servicios, este no valida JWT:

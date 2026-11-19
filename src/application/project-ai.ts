@@ -394,7 +394,7 @@ export class ProjectAssistant {
     system: string,
     prompt: string,
     json: Record<string, unknown>,
-    schema: z.ZodType<T, z.ZodTypeDef, unknown>,
+    schema: z.ZodType<T, unknown>,
   ): Promise<T> {
     const reply = await this.llm.generate({ system, prompt, schema: json });
     // Lo que se gastó se cuenta aunque luego la respuesta no valga: el proveedor lo cobró igual.

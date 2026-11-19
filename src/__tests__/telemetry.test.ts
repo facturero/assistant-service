@@ -1,6 +1,10 @@
 import { beforeAll, describe, expect, it } from 'vitest';
-import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
-import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
+import { context, trace } from '@opentelemetry/api';
+import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
+// SDK 3: sdk-trace-base y sdk-trace-node son ahora @opentelemetry/sdk-trace; `NodeTracerProvider.register()` pasó a ser un
+// `TracerProvider` que se registra con la API global (más el gestor de contexto que antes instalaba `register()`: sin él el
+// middleware no ve el span activo), y el procesador recibe el exportador como opción.
+import { InMemorySpanExporter, SimpleSpanProcessor, TracerProvider } from '@opentelemetry/sdk-trace';
 import { createApp } from '../interface/http/app.js';
 import { DomainError } from '../domain/errors.js';
 
@@ -12,7 +16,8 @@ const servidor = () => exporter.getFinishedSpans().filter((s) => s.kind === 1);
 let app: ReturnType<typeof createApp>;
 
 beforeAll(() => {
-  new NodeTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] }).register();
+  context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
+  trace.setGlobalTracerProvider(new TracerProvider({ spanProcessors: [new SimpleSpanProcessor({ exporter: exporter })] }));
   process.env.OTEL_EXPORTER_OTLP_ENDPOINT = 'http://colector:4318'; // lo que activa el middleware (como en producción)
   let llamadas = 0;
   const repos = {

@@ -20,10 +20,13 @@ if (endpoint) {
       'deployment.environment': process.env.NODE_ENV ?? 'development',
     }),
     traceExporter: new OTLPTraceExporter({ url: `${endpoint}/v1/traces` }),
-    metricReader: new PeriodicExportingMetricReader({
-      exporter: new OTLPMetricExporter({ url: `${endpoint}/v1/metrics` }),
-      exportIntervalMillis: 30_000,
-    }),
+    // SDK 0.30x: `metricReaders` es una lista (antes `metricReader`, uno solo).
+    metricReaders: [
+      new PeriodicExportingMetricReader({
+        exporter: new OTLPMetricExporter({ url: `${endpoint}/v1/metrics` }),
+        exportIntervalMillis: 30_000,
+      }),
+    ],
     instrumentations: [
       // El span de servidor lo crea `@hono/otel` (ver app.ts). Si HttpInstrumentation también lo hiciera, cada petición
       // tendría DOS spans de servidor (y se duplicaría su métrica de duración); aquí solo interesan las llamadas SALIENTES.
