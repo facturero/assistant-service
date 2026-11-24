@@ -536,7 +536,11 @@ export const CASES: BenchCase[] = [
         ok({
           from: q.from,
           to: q.to,
-          totals: { incomeCents: 14_716_90, costsCents: 8_230_00, expensesCents: 3_105_40, netIncomeCents: 3_381_50 },
+          // Forma real de accounting-service: la utilidad va en el primer nivel, no en `totals`.
+          grossProfitCents: 6_486_90,
+          netResultCents: 3_381_50,
+          compareGrossProfitCents: null,
+          compareNetResultCents: null,
           sections: [
             { key: 'income', totalCents: 14_716_90, rows: [{ code: '4.1', name: 'Ventas', level: 2, amountCents: 14_716_90 }] },
             { key: 'costs', totalCents: 8_230_00, rows: [{ code: '5.1', name: 'Costo de ventas', level: 2, amountCents: 8_230_00 }] },

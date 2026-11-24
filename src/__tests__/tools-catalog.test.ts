@@ -65,6 +65,25 @@ describe('recortes — el dinero llega en dólares y las listas acotadas', () =>
     expect(r.detalle[0]).toMatchObject({ nombre: 'Ferretería El Clavo', mas_90: '2500.00', total: '2500.00' });
   });
 
+  it('el estado de resultados real trae la utilidad en el primer nivel, y llega al modelo', () => {
+    // Forma de accounting-service (domain/statements.ts): grossProfitCents y netResultCents fuera de `totals`.
+    const r = statementTrim({
+      from: '2026-01-01',
+      to: '2026-11-24',
+      grossProfitCents: 0,
+      netResultCents: -1000,
+      compareGrossProfitCents: null,
+      compareNetResultCents: null,
+      sections: [{ key: 'expenses', totalCents: 1000, rows: [{ code: '6.9', name: 'Otros gastos', level: 2, amountCents: 1000 }] }],
+    }) as any;
+    expect(r.totales).toEqual({ grossProfit: '0.00', netResult: '-10.00' });
+  });
+
+  it('el balance mantiene sus totales anidados', () => {
+    const r = statementTrim({ asOf: '2026-11-24', totals: { assetsCents: 50000, liabilitiesAndEquityCents: 50000, differenceCents: 0, compareAssetsCents: null }, sections: [] }) as any;
+    expect(r.totales).toEqual({ assets: '500.00', liabilitiesAndEquity: '500.00', difference: '0.00' });
+  });
+
   it('el estado de resultados deja las secciones con total y quita las cuentas en cero', () => {
     const r = statementTrim({
       from: '2026-10-01',

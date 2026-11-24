@@ -141,7 +141,12 @@ export function agingTrim(body: unknown, listKey: string, nameKey: string, idKey
 export function statementTrim(body: unknown): unknown {
   const b = (body ?? {}) as Record<string, any>;
   const sections: Record<string, any>[] = Array.isArray(b.sections) ? b.sections : [];
-  const totals = b.totals && typeof b.totals === 'object' ? b.totals : {};
+  // El balance trae `totals` ({ assetsCents, liabilitiesAndEquityCents, differenceCents }); el estado de resultados trae sus
+  // totales en el primer nivel (`grossProfitCents`, `netResultCents`). Se juntan los dos, sin las comparaciones vacías: sin
+  // esto la utilidad no llegaba al modelo y contestaba «0,00» con gastos de 10 (prueba en producción, 2026-11-24).
+  const topLevel = Object.fromEntries(Object.entries(b).filter(([k, v]) => /Cents$/.test(k) && typeof v === 'number'));
+  const nested = b.totals && typeof b.totals === 'object' ? b.totals : {};
+  const totals = Object.fromEntries(Object.entries({ ...topLevel, ...nested }).filter(([, v]) => v !== null && v !== undefined));
   return {
     desde: b.from,
     hasta: b.to,
