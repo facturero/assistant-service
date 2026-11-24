@@ -10,6 +10,7 @@ import {
 import { availableTools, isBillingWrite, summarizeAction, toAnthropicTools, TOOLS_BY_NAME, ToolDefinition } from '../domain/tools';
 import { CrmApiPort, LlmMessage, LlmPort } from './ports';
 import { buildSystemPrompt, OrganizationContext } from './prompt';
+import { enforceRequestedFormat } from './reply-format';
 
 export interface TurnContext {
   organizationId: string;
@@ -297,10 +298,16 @@ export class Agent {
         requests: 1,
       });
 
+      // Tablas y gráficos solo si la persona los pidió en su último mensaje (ver reply-format.ts): se aplica al texto antes de
+      // guardarlo, así el historial y lo que ve la persona coinciden.
+      const lastUserText = lastUserMessageText(history);
+      const content = turn.content.map((b) =>
+        b.type === 'text' && typeof b.text === 'string' ? { ...b, text: enforceRequestedFormat(b.text, lastUserText) } : b,
+      );
       const assistantMessage = Message.create({
         conversationId: conversation.id,
         role: 'assistant',
-        content: turn.content,
+        content,
         inputTokens: turn.usage.inputTokens,
         outputTokens: turn.usage.outputTokens,
         cacheReadTokens: turn.usage.cacheReadTokens,
@@ -468,6 +475,17 @@ export class Agent {
 
 function toLlmMessage(message: Message): LlmMessage {
   return { role: message.role, content: message.content };
+}
+
+/** Lo último que escribió la persona: el mensaje de usuario más reciente con texto (los de `tool_result` no cuentan). */
+function lastUserMessageText(history: Message[]): string {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const m = history[i]!;
+    if (m.role !== 'user') continue;
+    const text = m.content.filter((b) => b.type === 'text').map((b) => String(b.text ?? '')).join('\n').trim();
+    if (text) return text;
+  }
+  return '';
 }
 
 function resultBlock(toolUseId: string, content: unknown, isError = false): ContentBlock {

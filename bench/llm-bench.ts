@@ -181,8 +181,9 @@ async function runCase(target: Target, c: BenchCase, round: number, timeoutMs: n
       output = [result.reply, ...result.pendingActions.map((a) => `[propone ${a.toolName}] ${JSON.stringify(a.input)}`)].join('\n');
       checks = [
         { name: 'cierra el turno (sin agotar vueltas)', ok: !result.truncated },
-        // El panel del chat no dibuja tablas markdown: se veían las «|» sueltas (prueba en producción, 2026-11-24).
-        { name: 'sin tablas markdown', ok: !/^\s*\|.*\|\s*$/m.test(result.reply) },
+        // Tablas y gráficos solo si la persona los pide (prompt, 2026-11-24): en una respuesta normal no deben aparecer.
+        ...(/tabla/i.test(c.message) ? [] : [{ name: 'sin tabla no pedida', ok: !/^\s*\|.*\|\s*$/m.test(result.reply) }]),
+        ...(/gr[aá]f[ií]c/i.test(c.message) ? [] : [{ name: 'sin gráfico no pedido', ok: !/```\s*(grafico|gráfico|chart)/i.test(result.reply) }]),
         ...c.check(result, crm),
       ];
     } else {

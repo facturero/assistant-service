@@ -483,6 +483,78 @@ export const CASES: BenchCase[] = [
   },
   {
     kind: 'agent',
+    id: 'tabla-pedida',
+    description: 'Si la persona pide una tabla, la tabla markdown viene con encabezado y una fila por producto.',
+    message: 'Dame en una tabla el stock disponible y reservado de mis productos.',
+    routes: {
+      'GET /products': () =>
+        ok({
+          items: [
+            { id: 'p-mart', name: 'Martillo de uña 16 oz', code: 'MART16', status: 'active' },
+            { id: 'p-clav', name: 'Clavos 1 kg', code: 'CLAV1K', status: 'active' },
+          ],
+          total: 2,
+        }),
+      'GET /stock': () =>
+        ok({
+          data: [
+            { productId: 'p-mart', warehouseCode: 'MATRIZ', quantityOnHand: '40.0000', quantityReserved: '6.0000', quantityAvailable: '34.0000' },
+            { productId: 'p-clav', warehouseCode: 'MATRIZ', quantityOnHand: '120.0000', quantityReserved: '0.0000', quantityAvailable: '120.0000' },
+          ],
+          total: 2,
+        }),
+      'GET /stock/products/:productId': (_q, _b, path) =>
+        path.endsWith('p-mart')
+          ? ok({ totalOnHand: '40.0000', totalReserved: '6.0000', totalAvailable: '34.0000', positions: [] })
+          : ok({ totalOnHand: '120.0000', totalReserved: '0.0000', totalAvailable: '120.0000', positions: [] }),
+    },
+    check: (r) => {
+      const filas = r.reply.split('\n').filter((l) => /^\s*\|.*\|\s*$/.test(l));
+      return [
+        check('responde con una tabla markdown', filas.length >= 4 && filas.some((l) => /^\s*\|?\s*:?-{2,}/.test(l)), `${filas.length} filas con «|»`),
+        check('una fila por producto con sus cifras', filas.some((l) => /martillo/i.test(l) && /\b34\b/.test(l)) && filas.some((l) => /clavos/i.test(l) && /\b120\b/.test(l))),
+      ];
+    },
+  },
+  {
+    kind: 'agent',
+    id: 'grafico-pedido',
+    description: 'Si la persona pide un gráfico, viene un bloque `grafico` con JSON válido y las cifras de la herramienta.',
+    message: 'Hazme un gráfico de barras con las ventas por cliente de octubre de 2026.',
+    routes: { 'GET /reporting/sales/summary': resumenVentas, 'GET /invoices': listarFacturas, 'GET /customers': buscarClientes(CLIENTES) },
+    check: (r, crm) => {
+      const m = /```\s*(?:grafico|gráfico|chart)\s*\n([\s\S]*?)\n\s*```/i.exec(r.reply);
+      let spec: any = null;
+      try {
+        spec = m ? JSON.parse(m[1]!) : null;
+      } catch {
+        spec = null;
+      }
+      const values: number[] = Array.isArray(spec?.values) ? spec.values.map(Number) : [];
+      const labels: string[] = Array.isArray(spec?.labels) ? spec.labels.map(String) : [];
+      return [
+        check('pide el resumen por cliente', crm.calls.some((c) => c.path === '/reporting/sales/summary' && c.query.groupBy === 'customer')),
+        check('trae un bloque grafico con JSON válido', !!spec, m ? m[1]!.slice(0, 120) : 'sin bloque'),
+        check('es de barras', spec?.type === 'bar'),
+        check('etiquetas y valores del mismo largo', labels.length > 0 && labels.length === values.length),
+        check('cifras de la herramienta (1315 para el Clavo)', labels.some((l, i) => /clavo/i.test(l) && Math.abs(values[i]! - 1315) < 0.01)),
+      ];
+    },
+  },
+  {
+    kind: 'agent',
+    id: 'que-puedes-hacer',
+    description: 'Al preguntar qué puede hacer, menciona que también da tablas y gráficos si se los piden.',
+    message: '¿Qué puedes hacer?',
+    routes: {},
+    check: (r) => [
+      check('menciona gráficos', /gr[aá]fic/i.test(r.reply)),
+      check('menciona tablas', /tabla/i.test(r.reply)),
+      check('no propone escrituras', r.pendingActions.length === 0),
+    ],
+  },
+  {
+    kind: 'agent',
     id: 'ordenes-por-aprobar',
     description: 'Órdenes de compra pendientes de aprobar: filtrar por estado.',
     message: '¿Qué órdenes de compra están esperando aprobación?',
