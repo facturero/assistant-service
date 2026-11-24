@@ -1,0 +1,81 @@
+# Servidor PRINCIPAL del modelo: vLLM en el PC de la RTX 5070. El respaldo es la
+# 4070 SUPER (`vllm-4070-external.yaml`): si este no responde, el asistente
+# conmuta solo (`FailoverLlm`, sondeo cada 10 s) y vuelve aquí cuando responde.
+#
+# vLLM NO corre dentro del clúster. Mismo truco que `ollama-external.yaml`: un
+# Service sin selector más un EndpointSlice con la IP, para que el Deployment
+# apunte a `http://vllm:8000/v1` y no sepa en qué equipo está.
+#
+# Cómo se levanta vLLM en ese PC (Windows → WSL2 + Docker con GPU; vLLM no corre
+# en Windows nativo). Una RTX 5070 (Blackwell) necesita una imagen reciente. El
+# MISMO comando sirve para la 4070 de respaldo:
+#
+#   docker run -d --name vllm --restart unless-stopped --gpus all --ipc=host \
+#     -p 8000:8000 -v hf-cache:/root/.cache/huggingface \
+#     vllm/vllm-openai:latest \
+#     --model cyankiwi/Qwen3.5-9B-AWQ-4bit --served-model-name crm-assistant \
+#     --max-model-len 16384 --gpu-memory-utilization 0.85 --max-num-seqs 8 \
+#     --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3 \
+#     --limit-mm-per-prompt '{"image":0,"video":0}'
+#
+#   Probado el 2026-11-24 en una RTX 4070 SUPER (12 GB) con vLLM 0.34 en WSL2:
+#   7,5 GiB de pesos + 2,3 GiB de caché (27.696 tokens: con 16384 por petición
+#   caben ~1,7 conversaciones largas a la vez; el catálogo completo de
+#   herramientas más el prompt ya son ~4.700 tokens). Con el banco del servicio
+#   (`npm run bench:llm`) dio 38/38 casos razonando (mediana 3,9 s) y 36/38 sin
+#   razonar (2,0 s), frente a 32/38 del mismo modelo en Ollama. Dejar el
+#   razonamiento del chat como viene (sin OPENAI_COMPAT_CHAT_REASONING).
+#   Gemma 4 12B (QAT w4a16 de Google, 8,3 GiB de pesos) NO arrancó en 12 GB:
+#   el warmup deja la caché KV en cero aunque se baje todo; necesita más VRAM.
+#
+#   - Qwen3.5-9B en AWQ (4 bits, cuantización de la comunidad, no oficial): en
+#     BF16 ocupa ~18 GB y no cabe en 12. Con 24 GB o más: Qwen3.8-27B (Apache
+#     2.0). La receta oficial exige vLLM >= 0.17.
+#   - Ojo con max_tokens: vLLM responde 400 si prompt + max_tokens supera
+#     --max-model-len. Por eso el Deployment fija ANTHROPIC_MAX_TOKENS=4000.
+#   - `--served-model-name crm-assistant`: el Deployment pide siempre ese nombre.
+#     Cambiar de modelo es cambiar `--model` aquí, sin tocar ni subir el servicio.
+#   - `--enable-auto-tool-choice --tool-call-parser`: sin ellos vLLM responde 400
+#     a toda petición con `tools`, y el chat del asistente las manda siempre. El
+#     parser depende de la familia del modelo: `qwen3_coder` para Qwen3.5 (con
+#     `hermes` hay reportes de 400), `gemma4` para Gemma 4.
+#   - `--reasoning-parser`: si el modelo piensa en el chat, saca ese texto de
+#     `content`; sin él, el razonamiento le llegaría a la persona.
+#   - `--max-model-len`: a diferencia de Ollama, vLLM no recorta en silencio un
+#     prompt que no cabe: responde 400. 8192 cubre el tope de `project-ai.ts`.
+#
+# Comprobación desde el servidor: curl http://<IP>:8000/v1/models
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm
+  labels:
+    app: vllm
+spec:
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
+---
+# La 5070 todavía no está en la red (2026-11-24): la lista va VACÍA a propósito.
+# Un Service sin direcciones rechaza la conexión al instante, el asistente marca
+# la 5070 como caída y atiende la 4070 sin esperar ningún timeout. El día que
+# llegue, con IP fija o reservada en el router (el PC de Ollama ya falló por el
+# DHCP, EHOSTUNREACH, 2026-11-10), se cambia por:
+#
+#   endpoints:
+#     - addresses:
+#         - "192.168.100.X"
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: vllm-1
+  labels:
+    kubernetes.io/service-name: vllm
+addressType: IPv4
+ports:
+  - name: http
+    port: 8000
+    protocol: TCP
+endpoints: []

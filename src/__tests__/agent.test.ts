@@ -196,6 +196,37 @@ describe('Agent — escrituras con confirmación', () => {
     expect(result.reply).toContain('Voy a crear');
   });
 
+  it('pedir confirmación en texto también se corrige: el botón lo pone el sistema', async () => {
+    // Así respondía gemma4:12b sin razonamiento en el banco de modelos: datos bien elegidos, ninguna llamada.
+    for (const pregunta of [
+      '¿Confirmas que cree el rol Cajero con estos permisos?',
+      '¿Deseas que proceda con la invitación?',
+      'He verificado que no existe. ¿Deseas que lo cree con un precio de 2550 centavos?',
+    ]) {
+      const llm = new ScriptedLlm([
+        { content: [textBlock(pregunta)] },
+        { content: [toolUseBlock('tu_2', 'crear_rol', { name: 'Cajero', permissions: ['customer:read'] })], stopReason: 'tool_use' },
+      ]);
+      const result = await new Agent(createInMemoryRepositories(), llm, new FakeCrmApi(), options).startOrContinue({
+        conversationId: null,
+        text: 'crea un rol Cajero',
+        ctx,
+      });
+      expect(llm.calls, pregunta).toHaveLength(2);
+      expect(result.pendingActions, pregunta).toHaveLength(1);
+    }
+  });
+
+  it('una pregunta sin verbo de escritura no se corrige', async () => {
+    const llm = new ScriptedLlm([{ content: [textBlock('No puedo emitir facturas. ¿Quieres que busque al cliente primero?')] }]);
+    await new Agent(createInMemoryRepositories(), llm, new FakeCrmApi(), options).startOrContinue({
+      conversationId: null,
+      text: 'factura a Juan',
+      ctx,
+    });
+    expect(llm.calls).toHaveLength(1);
+  });
+
   it('una respuesta que no anuncia escrituras no dispara correccion', async () => {
     const repos = createInMemoryRepositories();
     const crm = new FakeCrmApi();

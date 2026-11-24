@@ -76,16 +76,34 @@ spec:
             # red, y por eso vive aquí y no en el .enc. Para 'openai-compat' la
             # URL va CON /v1 y sin /chat/completions; para anthropic/opencode
             # iría SIN /v1, que lo añade el SDK.
+            # Principal: vLLM en el PC de la RTX 5070 (k8s/vllm-external.yaml).
+            # Respaldo: vLLM en la 4070 SUPER (k8s/vllm-4070-external.yaml). Si
+            # el principal no responde, el servicio conmuta solo y vuelve cuando
+            # responde. Mismo modelo y alias en los dos.
             - name: ASSISTANT_BASE_URL
-              value: "http://ollama:11434/v1"
+              value: "http://vllm:8000/v1"
+            - name: ASSISTANT_FALLBACK_BASE_URL
+              value: "http://vllm-4070:8000/v1"
+            # Mismo protocolo que Ollama, pero vLLM apaga el razonamiento por
+            # otra vía y rechaza la de Ollama con 400.
+            - name: OPENAI_COMPAT_SERVER
+              value: "vllm"
+            # El alias que pone `--served-model-name` en vLLM, no el modelo real:
+            # cambiar de modelo se hace en ese PC, sin subir este servicio.
             - name: ASSISTANT_MODEL
-              value: "gemma4:12b"
-            # Un modelo local tarda segundos, a veces minutos; cuando está frío
-            # (primera carga de gemma4:12b en el PC) puede superar los 3 min del
-            # tope por defecto y el asistente responde 502. Triplicado a 9 min.
-            # SOLO aplica al proveedor openai-compat (Ollama): Claude no lo lee.
+              value: "crm-assistant"
+            # vLLM carga el modelo al arrancar, no en la primera petición, así
+            # que ya no hay «arranque en frío» de varios minutos como con Ollama.
+            # Se deja holgado igual: un turno del agente con varias herramientas
+            # puede encadenar llamadas largas. Claude no lo lee.
             - name: ASSISTANT_LLM_TIMEOUT_MS
-              value: "540000"
+              value: "180000"
+            # vLLM rechaza con 400 la petición cuyo prompt + max_tokens supere
+            # su --max-model-len (8192). El valor por defecto (16000, pensado
+            # para Claude) haría fallar todos los turnos del chat. El prompt del
+            # agente ronda los 2.700 tokens; 4000 de respuesta caben con margen.
+            - name: ANTHROPIC_MAX_TOKENS
+              value: "4000"
             # Las claves de los proveedores de pago viven solo aquí, nunca en el
             # frontend. Las tres van como opcionales porque el servicio solo
             # exige la del proveedor elegido: hoy, ninguna.

@@ -7,7 +7,7 @@ import { loadConfig, resolveProvider } from './config.js';
 import { Agent } from './application/agent.js';
 import { ProjectAssistant } from './application/project-ai.js';
 import { ClaudeLlm } from './infrastructure/anthropic/claude-llm.js';
-import { OpenAiCompatibleLlm } from './infrastructure/openai/compatible-llm.js';
+import { createOpenAiCompatLlm } from './infrastructure/openai/factory.js';
 import { CrmApi } from './infrastructure/http/crm-api.js';
 import { initModels } from './infrastructure/persistence/models.js';
 import { createRepositories } from './infrastructure/persistence/repositories.js';
@@ -34,13 +34,7 @@ async function main(): Promise<void> {
   // formato de OpenAI y necesita traducción. El agente no nota la diferencia.
   const llm =
     provider.name === 'openai-compat'
-      ? new OpenAiCompatibleLlm({
-          baseURL: provider.baseURL!,
-          apiKey: provider.apiKey || undefined,
-          model: provider.model,
-          maxTokens: config.ANTHROPIC_MAX_TOKENS,
-          timeoutMs: config.ASSISTANT_LLM_TIMEOUT_MS,
-        })
+      ? createOpenAiCompatLlm(config, provider)
       : new ClaudeLlm({
           apiKey: provider.apiKey,
           baseURL: provider.baseURL,
@@ -74,7 +68,10 @@ async function main(): Promise<void> {
   // factura crece en la cuenta equivocada.
   console.log(
     `[assistant-service] escuchando en :${config.PORT} con ${provider.model} ` +
-      `vía ${provider.name}${provider.baseURL ? ` (${provider.baseURL})` : ''}`,
+      `vía ${provider.name}${provider.baseURL ? ` (${provider.baseURL})` : ''}` +
+      (provider.name === 'openai-compat' && config.ASSISTANT_FALLBACK_BASE_URL
+        ? `; respaldo ${config.ASSISTANT_FALLBACK_MODEL ?? provider.model} en ${config.ASSISTANT_FALLBACK_BASE_URL}`
+        : ''),
   );
 
   const shutdown = async () => {

@@ -141,7 +141,8 @@ function systemPrompt(task: string, locale: string): string {
 
 /**
  * Tope del contexto, en caracteres (~3.000 tokens). Ollama corta por delante, sin avisar, lo que no le cabe en su ventana (4.096
- * tokens por defecto) y lo primero que pierde es el prompt de sistema. Por eso se recorta aquí, y siempre lo más viejo.
+ * tokens por defecto) y lo primero que pierde es el prompt de sistema. Por eso se recorta aquí, y siempre lo más viejo. vLLM no
+ * recorta: responde 400. Este tope también lo mantiene dentro de su `--max-model-len`.
  */
 const MAX_CONTEXT_CHARS = 12_000;
 

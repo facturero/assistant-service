@@ -1,0 +1,43 @@
+# Servidor de RESPALDO del modelo: vLLM con el mismo modelo y alias
+# (`crm-assistant`) en el PC de la RTX 4070 SUPER, 192.168.100.229. Atiende
+# cuando la 5070 (`vllm-external.yaml`) no responde; el comando para levantarlo
+# es el mismo que está documentado allí.
+#
+# Requisitos en ese PC, porque es un equipo de escritorio y no un servidor:
+#   - Docker Desktop arrancando con la sesión de Windows y el contenedor con
+#     `--restart unless-stopped`: si el PC se reinicia, vuelve solo al iniciar
+#     sesión (Docker Desktop no corre sin sesión iniciada).
+#   - El cortafuegos de Windows debe dejar entrar el puerto 8000 desde el
+#     servidor (.149). Comprobación desde el servidor:
+#       curl http://192.168.100.229:8000/v1/models
+#   - vLLM reserva ~10 GB de VRAM mientras corre: esa GPU queda ocupada aunque
+#     nadie use el asistente. Ollama, en el mismo PC, no podrá cargar modelos
+#     grandes a la vez.
+#   - IP sin reserva DHCP todavía: si cambia, el respaldo deja de funcionar.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-4070
+  labels:
+    app: vllm-4070
+spec:
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: vllm-4070-1
+  labels:
+    kubernetes.io/service-name: vllm-4070
+addressType: IPv4
+ports:
+  - name: http
+    port: 8000
+    protocol: TCP
+endpoints:
+  - addresses:
+      - "192.168.100.229"

@@ -7,7 +7,7 @@ import {
   UnknownToolError,
   UsageLimitReachedError,
 } from '../domain/errors';
-import { isBillingWrite, summarizeAction, toAnthropicTools, TOOLS_BY_NAME, ToolDefinition } from '../domain/tools';
+import { availableTools, isBillingWrite, summarizeAction, toAnthropicTools, TOOLS_BY_NAME, ToolDefinition } from '../domain/tools';
 import { CrmApiPort, LlmMessage, LlmPort } from './ports';
 import { buildSystemPrompt, OrganizationContext } from './prompt';
 
@@ -17,6 +17,10 @@ export interface TurnContext {
   bearerToken: string;
   locale: string;
   organization: OrganizationContext;
+  /** Permisos del rol (cabecera `X-Permissions` del gateway). `null` = no se sabe y no se filtra por permiso. */
+  permissions?: string[] | null;
+  /** Módulos activos de la empresa. `null` = no se sabe y no se filtra por módulo. */
+  plugins?: Set<string> | null;
 }
 
 export interface TurnResult {
@@ -49,14 +53,24 @@ const MAX_WRITE_RETRIES = 2;
 const WRITE_ANNOUNCEMENT_RE =
   /\b(?:voy\s+a|vamos\s+a|me dispongo\s+a|procederé\s+a|te voy\s+a)\s+(?:a\s+)?(?:invitar|crear|dar\s+de\s+alta|actualizar)\b/i;
 
+/**
+ * La otra cara del mismo fallo: pedir permiso en prosa («¿Confirmas que cree el rol…?», «¿Deseas que proceda con la
+ * invitación?»). gemma4:12b sin razonamiento lo hacía en todas las escrituras (banco de modelos, 2026-11-24): elegía bien
+ * los datos, pero no emitía la llamada y la persona se quedaba sin el botón de confirmar. Solo cuenta si la pregunta lleva
+ * un verbo de escritura: «¿Quieres que busque al cliente?» es una pregunta legítima y no debe disparar nada.
+ */
+const WRITE_CONFIRMATION_RE =
+  /¿[^?]{0,40}\b(?:confirmas|confirma|deseas|desea|quieres|quiere|procedo|te parece)\b[^?]{0,80}\b(?:cree|crear|creo|invite|invitar|invito|registre|registrar|d[eé]\s+de\s+alta|dar\s+de\s+alta|proceda|proceder)\b[^?]*\?/i;
+
 const WRITE_PROMPT_AGAIN =
-  'Corrección: anunciaste que ibas a realizar una acción pero no llamaste a ninguna herramienta. ' +
+  'Corrección: anunciaste o pediste permiso en texto para una acción, pero no llamaste a ninguna herramienta. ' +
+  'No pidas confirmación en texto: el sistema ya se la pide a la persona con un botón antes de ejecutar nada. ' +
   'Si la petición requiere hacer algo (invitar, crear, dar de alta), llama a la herramienta ' +
   'correspondiente en este mismo turno. No lo anuncies solo en texto. Si no tienes ninguna ' +
   'herramienta para eso (por ejemplo, emitir una factura), no la inventes: di que no puedes hacerlo.';
 
 function announcesWrite(text: string): boolean {
-  return WRITE_ANNOUNCEMENT_RE.test(text);
+  return WRITE_ANNOUNCEMENT_RE.test(text) || WRITE_CONFIRMATION_RE.test(text);
 }
 
 /**
@@ -256,7 +270,7 @@ export class Agent {
   /** El bucle propiamente dicho. */
   private async run(conversation: Conversation, ctx: TurnContext): Promise<TurnResult> {
     const system = buildSystemPrompt(ctx.organization);
-    const tools = toAnthropicTools();
+    const tools = toAnthropicTools(availableTools(ctx.permissions ?? null, ctx.plugins ?? null));
 
     // La corrección se inyecta a la llamada siguiente y se reemplaza cada vuelta.
     // No viaja en el historial: es un empujón a la iteración, no un mensaje del

@@ -12,11 +12,32 @@ export interface OpenAiCompatibleOptions {
   maxTokens: number;
   /** Un modelo local puede tardar minutos. El de Anthropic, no. */
   timeoutMs: number;
+  /**
+   * Qué servidor hay detrás. El protocolo es el mismo, pero cada uno apaga el razonamiento a su manera y el otro modo le
+   * sienta mal: vLLM valida `reasoning_effort` contra `low|medium|high` y responde 400 a `'none'`. Por defecto, Ollama.
+   */
+  server?: OpenAiCompatibleServer | undefined;
+  /**
+   * Razonamiento en los turnos del chat del agente (las respuestas JSON lo llevan siempre apagado). Sin poner, no se manda
+   * nada y el modelo hace lo suyo. Importa más de lo que parece: medido el 2026-11-24 en la 4070 SUPER, gemma4:12b y
+   * qwen3.5:9b suman mal cinco importes con el razonamiento apagado (1.592,45 y 1.612,45 en vez de 1.692,45) y bien con él.
+   */
+  chatReasoning?: ChatReasoning | undefined;
 }
 
+export type ChatReasoning = 'none' | 'low' | 'medium' | 'high';
+
 /**
- * Adaptador para cualquier servicio que hable el formato de OpenAI: Ollama en
- * local, y las capas gratuitas de Groq, Gemini u OpenRouter.
+ * El servidor del modelo no está (apagado, sin red, colgado o devolviendo 5xx). Es la única falla en la que tiene sentido
+ * probar con otro servidor: un 400 o un 401 son de la petición o de la configuración y fallarían igual en el otro.
+ */
+export class LlmEndpointDownError extends AssistantUnavailableError {}
+
+export type OpenAiCompatibleServer = 'ollama' | 'vllm';
+
+/**
+ * Adaptador para cualquier servicio que hable el formato de OpenAI: vLLM u
+ * Ollama en local, y las capas gratuitas de Groq, Gemini u OpenRouter.
  *
  * **Por qué existe traducción aquí y no en el resto del servicio.** El agente
  * guarda el historial en bloques con forma de Anthropic (`tool_use`,
@@ -41,6 +62,7 @@ export class OpenAiCompatibleLlm implements LlmPort, StructuredLlmPort {
       model: this.options.model,
       max_tokens: this.options.maxTokens,
       temperature: 0,
+      ...this.razonamientoChat(),
       messages: [
         { role: 'system', content: params.system },
         ...params.messages.flatMap(toOpenAiMessages),
@@ -58,7 +80,7 @@ export class OpenAiCompatibleLlm implements LlmPort, StructuredLlmPort {
     }
 
     return {
-      content: toAnthropicBlocks(eleccion.message ?? {}),
+      content: toAnthropicBlocks(rescatarRespuesta(eleccion)),
       stopReason: toStopReason(eleccion.finish_reason),
       stopDetails: null,
       usage: {
@@ -88,7 +110,7 @@ export class OpenAiCompatibleLlm implements LlmPort, StructuredLlmPort {
         // Sin razonamiento. gemma4 en Ollama «pensaba» hasta llenar su ventana de 4.096 tokens (finish_reason `length`) y
         // devolvía `content` vacío tras 80 s; resumir texto ya escrito no lo necesita. Medido el 2026-11-06 con Ollama 0.32:
         // `reasoning_effort: 'none'` lo apaga (21 tokens de salida); `think: false` no surte efecto por esta ruta.
-        reasoning_effort: 'none',
+        ...this.sinRazonamiento(),
         temperature: 0,
         messages: [
           { role: 'system', content: params.system },
@@ -117,6 +139,25 @@ export class OpenAiCompatibleLlm implements LlmPort, StructuredLlmPort {
     };
   }
 
+  /**
+   * vLLM no entiende `reasoning_effort: 'none'` (400). Ahí el razonamiento se apaga en la plantilla de chat del modelo:
+   * `enable_thinking` es la variable que leen las plantillas que piensan (Qwen3 y otras); las que no la usan la ignoran, así
+   * que mandarla siempre es inocuo.
+   */
+  private sinRazonamiento(): Record<string, unknown> {
+    return this.options.server === 'vllm'
+      ? { chat_template_kwargs: { enable_thinking: false } }
+      : { reasoning_effort: 'none' };
+  }
+
+  private razonamientoChat(): Record<string, unknown> {
+    const nivel = this.options.chatReasoning;
+    if (!nivel) return {};
+    if (nivel === 'none') return this.sinRazonamiento();
+    // vLLM solo entiende `reasoning_effort` en algunos modelos (gpt-oss); en el resto, pensar o no se decide en la plantilla.
+    return this.options.server === 'vllm' ? { chat_template_kwargs: { enable_thinking: true } } : { reasoning_effort: nivel };
+  }
+
   private async post(body: unknown): Promise<any> {
     const corte = AbortSignal.timeout(this.options.timeoutMs);
     let r: Response;
@@ -133,7 +174,7 @@ export class OpenAiCompatibleLlm implements LlmPort, StructuredLlmPort {
     } catch (error) {
       const motivo = corte.aborted ? 'el modelo tardó demasiado' : 'no se pudo conectar con el modelo';
       console.error('[assistant-service] fallo al llamar al proveedor:', error);
-      throw new AssistantUnavailableError(motivo);
+      throw new LlmEndpointDownError(motivo);
     }
 
     if (!r.ok) {
@@ -145,6 +186,7 @@ export class OpenAiCompatibleLlm implements LlmPort, StructuredLlmPort {
       if (r.status === 429) {
         throw new AssistantUnavailableError('hay demasiadas peticiones ahora mismo, prueba en un minuto');
       }
+      if (r.status >= 500) throw new LlmEndpointDownError('el proveedor devolvió un error');
       throw new AssistantUnavailableError('el proveedor devolvió un error');
     }
     return r.json();
@@ -195,6 +237,23 @@ function toOpenAiMessages(message: LlmMessage): Array<Record<string, unknown>> {
   }
 
   return [{ role: 'user', content: texto }];
+}
+
+/**
+ * qwen3.5 razonando, tras el resultado de una herramienta, contesta sin cerrar su bloque de razonamiento, y Ollama (0.32 y
+ * 0.40.18, comprobado el 2026-11-24) le pone la respuesta entera en `reasoning` con `content` vacío. Sin esto la persona
+ * recibía un mensaje en blanco aunque el modelo hubiera contestado bien. Solo se rescata cuando el turno terminó de verdad
+ * (`stop`), sin texto y sin llamadas: en cualquier otro caso `reasoning` es razonamiento y no se enseña.
+ */
+function rescatarRespuesta(eleccion: Record<string, any>): Record<string, any> {
+  const message = eleccion.message ?? {};
+  const sinTexto = typeof message.content !== 'string' || !message.content.trim();
+  const sinLlamadas = !Array.isArray(message.tool_calls) || message.tool_calls.length === 0;
+  const razonamiento = message.reasoning ?? message.reasoning_content;
+  if (eleccion.finish_reason === 'stop' && sinTexto && sinLlamadas && typeof razonamiento === 'string' && razonamiento.trim()) {
+    return { ...message, content: razonamiento };
+  }
+  return message;
 }
 
 /** La respuesta del modelo, traducida a los bloques que guarda el agente. */

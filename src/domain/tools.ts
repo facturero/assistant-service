@@ -54,6 +54,14 @@ export interface ToolDefinition {
   /** Campos que viajan en el query string (GET) en vez de en el cuerpo. */
   queryParams?: string[];
   /**
+   * Módulo del catálogo que el gateway exige para esta ruta (`requiresPlugin`) y permiso que exige el servicio. Solo se le
+   * ofrece al modelo lo que esta persona puede usar: cada herramienta ocupa ~120 tokens del contexto, y una que siempre
+   * responde 403 solo sirve para que el modelo la intente. No es la barrera de seguridad —esa sigue siendo la API con el
+   * JWT del usuario—, es no ofrecer lo que fallará.
+   */
+  plugin?: string;
+  permission?: string;
+  /**
    * Frase en primera persona que se le enseña al usuario antes de confirmar.
    * Se escribe aquí y no se le pide al modelo: lo que se confirma tiene que
    * describir lo que de verdad va a pasar, no lo que el modelo dice que pasará.
@@ -78,10 +86,84 @@ export interface ToolDefinition {
 const str = (description: string) => ({ type: 'string', description });
 const num = (description: string) => ({ type: 'number', description });
 
+// ── Recortes ───────────────────────────────────────────────────────────────
+// Cada resultado de herramienta se reenvía entero en cada vuelta del bucle (ver `trim`). Estas piezas dejan solo lo que el
+// modelo usa y pasan el dinero a dólares: dividir centavos entre 100 es justo la cuenta que un modelo pequeño falla.
+
+/** Centavos (entero) → "1234.56". Lo que no es número pasa tal cual. */
+export const usd = (cents: unknown): unknown =>
+  typeof cents === 'number' || (typeof cents === 'string' && /^-?\d+$/.test(cents)) ? (Number(cents) / 100).toFixed(2) : cents;
+
+export function pick(obj: unknown, keys: string[]): Record<string, unknown> {
+  const o = (obj ?? {}) as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const k of keys) if (o[k] !== undefined && o[k] !== null) out[k] = o[k];
+  return out;
+}
+
+/**
+ * Aplica `fn` a cada elemento de una lista, venga como arreglo o como página (`items`, `data`). Corta en 50: más filas no
+ * caben en el contexto con utilidad y el modelo debería filtrar en vez de pedir todo. Si había más, lo dice.
+ */
+export function mapList(body: unknown, fn: (row: Record<string, any>) => unknown, max = 50): unknown {
+  const b = body as Record<string, any>;
+  const rows: Record<string, any>[] = Array.isArray(body) ? body : Array.isArray(b?.items) ? b.items : Array.isArray(b?.data) ? b.data : [];
+  if (!Array.isArray(body) && !Array.isArray(b?.items) && !Array.isArray(b?.data)) return body;
+  const total = typeof b?.total === 'number' ? b.total : rows.length;
+  const out: Record<string, unknown> = { items: rows.slice(0, max).map(fn), total };
+  if (total > Math.min(rows.length, max)) out.aviso = `Hay ${total} en total y aquí van ${Math.min(rows.length, max)}: filtra para ver el resto.`;
+  return out;
+}
+
+const TRAMOS: Array<[string, string]> = [
+  ['currentCents', 'corriente'],
+  ['days1To30Cents', 'd1_30'],
+  ['days31To60Cents', 'd31_60'],
+  ['days61To90Cents', 'd61_90'],
+  ['daysOver90Cents', 'mas_90'],
+  ['totalCents', 'total'],
+];
+const tramos = (b: Record<string, any>) => Object.fromEntries(TRAMOS.map(([k, n]) => [n, usd(b?.[k])]));
+
+/** Antigüedad de saldos: totales y las 30 partes que más deben, con los tramos en dólares. */
+export function agingTrim(body: unknown, listKey: string, nameKey: string, idKey: string): unknown {
+  const b = (body ?? {}) as Record<string, any>;
+  const parts: Record<string, any>[] = Array.isArray(b[listKey]) ? b[listKey] : [];
+  return {
+    fecha: b.asOf,
+    totales: tramos(b.totals),
+    detalle: parts.slice(0, 30).map((p) => ({ nombre: p[nameKey], id: p[idKey], ...tramos(p) })),
+    ...(parts.length > 30 ? { aviso: `Hay ${parts.length}; aquí van las 30 con más saldo.` } : {}),
+  };
+}
+
+/** Estado de resultados o balance: por sección, su total y las cuentas con importe, en dólares. */
+export function statementTrim(body: unknown): unknown {
+  const b = (body ?? {}) as Record<string, any>;
+  const sections: Record<string, any>[] = Array.isArray(b.sections) ? b.sections : [];
+  const totals = b.totals && typeof b.totals === 'object' ? b.totals : {};
+  return {
+    desde: b.from,
+    hasta: b.to,
+    fecha: b.asOf,
+    totales: Object.fromEntries(Object.entries(totals).map(([k, v]) => [k.replace(/Cents$/, ''), usd(v)])),
+    secciones: sections.map((s) => ({
+      seccion: s.key,
+      total: usd(s.totalCents),
+      cuentas: (Array.isArray(s.rows) ? s.rows : [])
+        .filter((r: any) => Number(r.amountCents) !== 0)
+        .slice(0, 25)
+        .map((r: any) => ({ codigo: r.code, cuenta: r.name, nivel: r.level, importe: usd(r.amountCents) })),
+    })),
+  };
+}
+
 export const TOOLS: ToolDefinition[] = [
   // ── Lectura ──────────────────────────────────────────────────────────────
   {
     name: 'listar_clientes',
+    plugin: 'crm.contacts',
+    permission: 'customer:read',
     description:
       'Lista los clientes de la organización. Admite búsqueda por texto y filtro por estado. Úsalo antes de crear un cliente para comprobar si ya existe.',
     risk: 'read',
@@ -100,6 +182,8 @@ export const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'ver_cliente',
+    plugin: 'crm.contacts',
+    permission: 'customer:read',
     description: 'Detalle de un cliente con sus contactos, direcciones y etiquetas.',
     risk: 'read',
     method: 'GET',
@@ -113,6 +197,8 @@ export const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'listar_productos',
+    plugin: 'infra.catalog_products',
+    permission: 'product:read',
     description: 'Lista los productos del catálogo. Admite búsqueda por texto y filtro por estado.',
     risk: 'read',
     method: 'GET',
@@ -130,8 +216,10 @@ export const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'listar_facturas',
+    plugin: 'finance.electronic_invoicing',
+    permission: 'invoice:read',
     description:
-      'Lista las facturas emitidas. Admite ventana de fechas y estado. Es la fuente para cualquier informe de ventas: pide los datos y haz tú las cuentas, no las inventes.',
+      'Lista facturas emitidas una por una (número, cliente, fecha, estado). Para totales o rankings de ventas usa resumen_ventas: aquí no vienen todas y no hay que sumarlas a mano.',
     risk: 'read',
     method: 'GET',
     path: '/invoices',
@@ -149,7 +237,47 @@ export const TOOLS: ToolDefinition[] = [
     },
   },
   {
+    name: 'resumen_ventas',
+    plugin: 'finance.electronic_invoicing',
+    permission: 'invoice:read',
+    description:
+      'Ventas de un periodo YA SUMADAS por la base de datos: total, o agrupadas por producto (lo más vendido), cliente (quién compra más), día o mes. Las notas de crédito ya restan y las anuladas no cuentan. Úsala para cualquier cifra de ventas; no sumes facturas a mano.',
+    risk: 'read',
+    method: 'GET',
+    path: '/reporting/sales/summary',
+    queryParams: ['from', 'to', 'groupBy', 'limit'],
+    inputSchema: {
+      type: 'object',
+      properties: {
+        from: str('Fecha inicial YYYY-MM-DD'),
+        to: str('Fecha final YYYY-MM-DD'),
+        groupBy: { type: 'string', enum: ['total', 'product', 'customer', 'day', 'month'], description: 'Cómo agrupar (por defecto total)' },
+        limit: num('Máximo de filas (por defecto 20)'),
+      },
+      required: ['from', 'to'],
+      additionalProperties: false,
+    },
+    trim: (body) => {
+      const b = (body ?? {}) as Record<string, any>;
+      const t = b.totals ?? {};
+      return {
+        desde: b.from,
+        hasta: b.to,
+        totales: { sin_iva: usd(t.netCents), con_iva: usd(t.totalCents), comprobantes: t.documents, notas_credito: t.creditNotes },
+        filas: (Array.isArray(b.rows) ? b.rows : []).map((r: any) => ({
+          nombre: r.label ?? r.key,
+          ...(r.code ? { codigo: r.code } : {}),
+          ...(r.quantity !== null && r.quantity !== undefined ? { cantidad: r.quantity } : {}),
+          sin_iva: usd(r.netCents),
+          ...(r.totalCents !== null && r.totalCents !== undefined ? { con_iva: usd(r.totalCents) } : {}),
+          comprobantes: r.documents,
+        })),
+      };
+    },
+  },
+  {
     name: 'listar_empleados',
+    permission: 'user:read',
     description: 'Lista los usuarios de la organización con sus roles y su estado.',
     risk: 'read',
     method: 'GET',
@@ -166,6 +294,7 @@ export const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'listar_roles',
+    permission: 'user:read',
     description: 'Lista los roles de la organización con los permisos que tiene cada uno.',
     risk: 'read',
     method: 'GET',
@@ -199,6 +328,8 @@ export const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'listar_establecimientos',
+    plugin: 'org.establishments',
+    permission: 'establishment:read',
     description: 'Establecimientos de la organización y sus puntos de emisión.',
     risk: 'read',
     method: 'GET',
@@ -206,9 +337,395 @@ export const TOOLS: ToolDefinition[] = [
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
 
+  {
+    name: 'listar_tipos_identificacion',
+    plugin: 'crm.contacts',
+    description:
+      'Tipos de identificación válidos en el país de la empresa (cédula, RUC, pasaporte…), con su id. Úsalo para elegir identificationTypeId antes de crear un cliente.',
+    risk: 'read',
+    method: 'GET',
+    path: '/identification-types',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    trim: (body) => mapList(body, (t) => pick(t, ['id', 'code', 'name'])),
+  },
+
+  // ── Cobranza y pagos (tesorería) ─────────────────────────────────────────
+  // Los importes salen en dólares con dos decimales, no en centavos: así el modelo no tiene que dividir, que es justo donde
+  // los modelos pequeños se equivocan (banco de modelos, 2026-11-24).
+  {
+    name: 'cuentas_por_cobrar',
+    plugin: 'finance.accounts_receivable_payable',
+    permission: 'receivable:read',
+    description:
+      'Facturas pendientes de cobro, con saldo y vencimiento. Filtra por cliente, solo vencidas o por texto. Para saber quién debe más, usa mejor antiguedad_cobranza.',
+    risk: 'read',
+    method: 'GET',
+    path: '/treasury/receivables',
+    queryParams: ['customerId', 'overdueOnly', 'q', 'pageSize'],
+    inputSchema: {
+      type: 'object',
+      properties: {
+        customerId: str('Id del cliente (de listar_clientes)'),
+        overdueOnly: { type: 'boolean', description: 'Solo las vencidas' },
+        q: str('Texto a buscar: cliente o número de factura'),
+        pageSize: num('Máximo de resultados (por defecto 20)'),
+      },
+      additionalProperties: false,
+    },
+    trim: (body) =>
+      mapList(body, (r) => ({
+        cliente: r.customerName,
+        customerId: r.customerId,
+        factura: r.documentNumber,
+        emision: r.issueDate,
+        vence: r.dueDate,
+        original: usd(r.originalCents),
+        saldo: usd(r.balanceCents),
+        estado: r.status,
+      })),
+  },
+  {
+    name: 'antiguedad_cobranza',
+    plugin: 'finance.accounts_receivable_payable',
+    permission: 'receivable:read',
+    description:
+      'Cuánto debe cada cliente, repartido por tramos de atraso (corriente, 1-30, 31-60, 61-90, más de 90 días), de mayor a menor. Los totales ya vienen sumados.',
+    risk: 'read',
+    method: 'GET',
+    path: '/treasury/receivables/aging',
+    queryParams: ['asOf'],
+    inputSchema: {
+      type: 'object',
+      properties: { asOf: str('Fecha de corte YYYY-MM-DD (por defecto hoy)') },
+      additionalProperties: false,
+    },
+    trim: (body) => agingTrim(body, 'customers', 'customerName', 'customerId'),
+  },
+  {
+    name: 'estado_cuenta_cliente',
+    plugin: 'finance.accounts_receivable_payable',
+    permission: 'receivable:read',
+    description: 'Estado de cuenta de un cliente: lo que debe, sus anticipos y el neto. Pide antes el id con listar_clientes.',
+    risk: 'read',
+    method: 'GET',
+    path: '/treasury/customers/:id/statement',
+    queryParams: ['asOf'],
+    inputSchema: {
+      type: 'object',
+      properties: { id: str('Id del cliente'), asOf: str('Fecha de corte YYYY-MM-DD (por defecto hoy)') },
+      required: ['id'],
+      additionalProperties: false,
+    },
+    trim: (body) => {
+      const b = (body ?? {}) as Record<string, any>;
+      return {
+        fecha: b.asOf,
+        debe: usd(b.receivableCents),
+        anticipos: usd(b.advanceCents),
+        neto: usd(b.netCents),
+        facturas: (Array.isArray(b.receivables) ? b.receivables : [])
+          .filter((r: any) => Number(r.balanceCents) !== 0)
+          .slice(0, 30)
+          .map((r: any) => ({ factura: r.documentNumber, vence: r.dueDate, saldo: usd(r.balanceCents), estado: r.status })),
+      };
+    },
+  },
+  {
+    name: 'cuentas_por_pagar',
+    plugin: 'finance.accounts_receivable_payable',
+    permission: 'payable:read',
+    description: 'Lo que la empresa debe a proveedores, con saldo y vencimiento. Filtra por proveedor, solo vencidas o por vencer pronto.',
+    risk: 'read',
+    method: 'GET',
+    path: '/treasury/payables',
+    queryParams: ['supplierId', 'overdueOnly', 'dueSoon', 'q', 'pageSize'],
+    inputSchema: {
+      type: 'object',
+      properties: {
+        supplierId: str('Id del proveedor (de listar_proveedores)'),
+        overdueOnly: { type: 'boolean', description: 'Solo las vencidas' },
+        dueSoon: { type: 'boolean', description: 'Solo las que vencen pronto' },
+        q: str('Texto a buscar: proveedor o número'),
+        pageSize: num('Máximo de resultados (por defecto 20)'),
+      },
+      additionalProperties: false,
+    },
+    trim: (body) =>
+      mapList(body, (r) => ({
+        proveedor: r.supplierName,
+        documento: r.documentNumber,
+        vence: r.dueDate,
+        original: usd(r.originalCents),
+        saldo: usd(r.balanceCents),
+        estado: r.status,
+      })),
+  },
+  {
+    name: 'antiguedad_pagos',
+    plugin: 'finance.accounts_receivable_payable',
+    permission: 'payable:read',
+    description: 'Cuánto se debe a cada proveedor por tramos de vencimiento, de mayor a menor. Los totales ya vienen sumados.',
+    risk: 'read',
+    method: 'GET',
+    path: '/treasury/payables/aging',
+    queryParams: ['asOf'],
+    inputSchema: {
+      type: 'object',
+      properties: { asOf: str('Fecha de corte YYYY-MM-DD (por defecto hoy)') },
+      additionalProperties: false,
+    },
+    trim: (body) => agingTrim(body, 'suppliers', 'supplierName', 'supplierId'),
+  },
+
+  // ── Inventario ───────────────────────────────────────────────────────────
+  {
+    name: 'stock_producto',
+    plugin: 'inventory.kardex',
+    permission: 'inventory:read',
+    description: 'Existencias de un producto en todas las bodegas (disponible, reservado, total). Pide antes el id con listar_productos.',
+    risk: 'read',
+    method: 'GET',
+    path: '/stock/products/:productId',
+    inputSchema: {
+      type: 'object',
+      properties: { productId: str('Id del producto') },
+      required: ['productId'],
+      additionalProperties: false,
+    },
+    trim: (body) => {
+      const b = (body ?? {}) as Record<string, any>;
+      return {
+        total: b.totalOnHand,
+        reservado: b.totalReserved,
+        disponible: b.totalAvailable,
+        bodegas: (Array.isArray(b.positions) ? b.positions : []).map((p: any) =>
+          pick(p, ['warehouseCode', 'warehouseName', 'quantityOnHand', 'quantityReserved', 'quantityAvailable']),
+        ),
+      };
+    },
+  },
+  {
+    name: 'stock_bajo',
+    plugin: 'inventory.kardex',
+    permission: 'inventory:read',
+    description: 'Productos con poco stock o sin stock, por bodega. Para ver un producto concreto usa stock_producto.',
+    risk: 'read',
+    method: 'GET',
+    path: '/stock',
+    queryParams: ['lowStock', 'stockState', 'warehouseId', 'pageSize'],
+    inputSchema: {
+      type: 'object',
+      properties: {
+        lowStock: { type: 'boolean', description: 'Solo los que están bajo su mínimo' },
+        stockState: { type: 'string', enum: ['with_stock', 'without_stock'], description: 'without_stock = agotados' },
+        warehouseId: str('Id de la bodega (de listar_bodegas)'),
+        pageSize: num('Máximo de resultados (por defecto 30)'),
+      },
+      additionalProperties: false,
+    },
+    trim: (body) =>
+      mapList(body, (p) => pick(p, ['productId', 'warehouseCode', 'quantityOnHand', 'quantityReserved', 'quantityAvailable'])),
+  },
+  {
+    name: 'listar_bodegas',
+    plugin: 'inventory.warehouses',
+    permission: 'inventory:read',
+    description: 'Bodegas de la empresa.',
+    risk: 'read',
+    method: 'GET',
+    path: '/warehouses',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    trim: (body) => mapList(body, (w) => pick(w, ['id', 'code', 'name', 'isDefault', 'status'])),
+  },
+
+  // ── Compras ──────────────────────────────────────────────────────────────
+  {
+    name: 'listar_proveedores',
+    plugin: 'inventory.suppliers',
+    permission: 'supplier:read',
+    description: 'Proveedores de la empresa. Admite búsqueda por texto.',
+    risk: 'read',
+    method: 'GET',
+    path: '/purchasing/suppliers',
+    queryParams: ['q', 'status', 'pageSize'],
+    inputSchema: {
+      type: 'object',
+      properties: {
+        q: str('Texto a buscar: nombre o identificación'),
+        status: { type: 'string', enum: ['active', 'inactive'], description: 'Estado del proveedor' },
+        pageSize: num('Máximo de resultados (por defecto 20)'),
+      },
+      additionalProperties: false,
+    },
+    trim: (body) => mapList(body, (p) => pick(p, ['id', 'name', 'legalName', 'tradeName', 'identification', 'email', 'phone', 'status'])),
+  },
+  {
+    name: 'listar_ordenes_compra',
+    plugin: 'purchasing.purchase_orders',
+    permission: 'purchase:read',
+    description:
+      'Órdenes de compra. Estados: pending_approval (por aprobar), approved (por recibir), partially_received, received, closed, draft, cancelled, rejected.',
+    risk: 'read',
+    method: 'GET',
+    path: '/purchasing/orders',
+    queryParams: ['status', 'supplierId', 'from', 'to', 'q', 'pageSize'],
+    inputSchema: {
+      type: 'object',
+      properties: {
+        status: {
+          type: 'string',
+          enum: ['draft', 'pending_approval', 'approved', 'partially_received', 'received', 'closed', 'cancelled', 'rejected'],
+          description: 'Estado de la orden',
+        },
+        supplierId: str('Id del proveedor'),
+        from: str('Fecha inicial YYYY-MM-DD'),
+        to: str('Fecha final YYYY-MM-DD'),
+        q: str('Texto a buscar'),
+        pageSize: num('Máximo de resultados (por defecto 20)'),
+      },
+      additionalProperties: false,
+    },
+    trim: (body) =>
+      mapList(body, (o) => ({
+        numero: o.number,
+        proveedor: o.supplier?.name ?? o.supplier?.legalName ?? o.supplierId,
+        estado: o.status,
+        fecha: o.orderDate,
+        esperada: o.expectedDate,
+        total: usd(o.totalCents),
+        lineas: o.lineCount,
+      })),
+  },
+  {
+    name: 'listar_facturas_compra',
+    plugin: 'purchasing.purchase_orders',
+    permission: 'purchase_bill:read',
+    description: 'Facturas de proveedores registradas. Filtra por proveedor, estado (draft, posted, blocked, voided) y fechas.',
+    risk: 'read',
+    method: 'GET',
+    path: '/purchasing/bills',
+    queryParams: ['status', 'supplierId', 'from', 'to', 'q', 'pageSize'],
+    inputSchema: {
+      type: 'object',
+      properties: {
+        status: { type: 'string', enum: ['draft', 'posted', 'blocked', 'voided'], description: 'Estado de la factura' },
+        supplierId: str('Id del proveedor'),
+        from: str('Fecha inicial YYYY-MM-DD'),
+        to: str('Fecha final YYYY-MM-DD'),
+        q: str('Texto a buscar'),
+        pageSize: num('Máximo de resultados (por defecto 20)'),
+      },
+      additionalProperties: false,
+    },
+    trim: (body) =>
+      mapList(body, (b) => ({
+        numero: [b.establishment, b.emissionPoint, b.sequential].filter(Boolean).join('-') || b.internalNumber,
+        proveedor: b.supplier?.name ?? b.supplier?.legalName ?? b.supplierId,
+        emision: b.issueDate,
+        vence: b.dueDate,
+        total: usd(b.totalCents),
+        estado: b.status,
+        conciliacion: b.matchStatus,
+      })),
+  },
+
+  // ── Proyectos ────────────────────────────────────────────────────────────
+  {
+    name: 'mis_tareas',
+    plugin: 'projects.tasks_kanban',
+    permission: 'project:read',
+    description: 'Las tareas asignadas a la persona con la que hablas (y sus tareas personales), con fecha de entrega y proyecto.',
+    risk: 'read',
+    method: 'GET',
+    path: '/projects/my-tasks',
+    queryParams: ['includeCompleted'],
+    inputSchema: {
+      type: 'object',
+      properties: { includeCompleted: { type: 'boolean', description: 'Incluir también las terminadas' } },
+      additionalProperties: false,
+    },
+    trim: (body) =>
+      mapList(body, (t) => ({
+        tarea: t.title,
+        entrega: t.dueOn,
+        terminada: Boolean(t.completedAt),
+        proyecto: Array.isArray(t.projects) ? t.projects.map((p: any) => p.name).join(', ') : undefined,
+        subtareas: t.subtasks,
+      })),
+  },
+
+  // ── Contabilidad ─────────────────────────────────────────────────────────
+  {
+    name: 'estado_resultados',
+    plugin: 'finance.general_ledger',
+    permission: 'ledger:read',
+    description: 'Estado de resultados (ingresos, costos, gastos y utilidad) entre dos fechas, con totales ya calculados.',
+    risk: 'read',
+    method: 'GET',
+    path: '/accounting/reports/income-statement',
+    queryParams: ['from', 'to', 'maxLevel'],
+    inputSchema: {
+      type: 'object',
+      properties: {
+        from: str('Fecha inicial YYYY-MM-DD'),
+        to: str('Fecha final YYYY-MM-DD'),
+        maxLevel: num('Nivel de detalle del plan de cuentas (por defecto 2)'),
+      },
+      required: ['from', 'to'],
+      additionalProperties: false,
+    },
+    trim: statementTrim,
+  },
+  {
+    name: 'balance_general',
+    plugin: 'finance.general_ledger',
+    permission: 'ledger:read',
+    description: 'Balance general (activos, pasivos y patrimonio) a una fecha, con totales ya calculados.',
+    risk: 'read',
+    method: 'GET',
+    path: '/accounting/reports/balance-sheet',
+    queryParams: ['asOf', 'maxLevel'],
+    inputSchema: {
+      type: 'object',
+      properties: {
+        asOf: str('Fecha de corte YYYY-MM-DD'),
+        maxLevel: num('Nivel de detalle del plan de cuentas (por defecto 2)'),
+      },
+      required: ['asOf'],
+      additionalProperties: false,
+    },
+    trim: statementTrim,
+  },
+
+  // ── Bitácora ─────────────────────────────────────────────────────────────
+  {
+    name: 'buscar_bitacora',
+    permission: 'audit:read',
+    description:
+      'Bitácora de auditoría: quién hizo qué y cuándo. Filtra por el id de lo afectado (targetId), por persona (userId), por texto o por fechas.',
+    risk: 'read',
+    method: 'GET',
+    path: '/audit-logs',
+    queryParams: ['targetId', 'userId', 'search', 'from', 'to', 'limit'],
+    inputSchema: {
+      type: 'object',
+      properties: {
+        targetId: str('Id del registro afectado (cliente, factura, rol…)'),
+        userId: str('Id de la persona que actuó'),
+        search: str('Texto a buscar'),
+        from: str('Fecha inicial YYYY-MM-DD'),
+        to: str('Fecha final YYYY-MM-DD'),
+        limit: num('Máximo de resultados (por defecto 20)'),
+      },
+      additionalProperties: false,
+    },
+    trim: (body) => mapList(body, (e) => pick(e, ['occurredAt', 'userEmail', 'event', 'summary', 'via'])),
+  },
+
   // ── Escritura (siempre con confirmación humana) ───────────────────────────
   {
     name: 'crear_rol',
+    permission: 'user:assign_role',
     description:
       'Crea un rol nuevo con un conjunto de permisos. Antes de llamarla, consulta el catálogo de permisos y elige solo los que hagan falta: un rol con permisos de más es un agujero de seguridad.',
     risk: 'write',
@@ -235,6 +752,7 @@ export const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'invitar_empleado',
+    permission: 'user:invite',
     description:
       'Invita a una persona a la organización por correo. Recibe un enlace para activar su cuenta. Comprueba antes con listar_roles que el rol que vas a asignar existe.',
     risk: 'write',
@@ -260,6 +778,8 @@ export const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'crear_cliente',
+    plugin: 'crm.contacts',
+    permission: 'customer:create',
     description:
       'Da de alta un cliente. Comprueba antes con listar_clientes que no exista ya uno con la misma identificación.',
     risk: 'write',
@@ -282,6 +802,8 @@ export const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'crear_producto',
+    plugin: 'infra.catalog_products',
+    permission: 'product:create',
     description: 'Da de alta un producto en el catálogo.',
     risk: 'write',
     method: 'POST',
@@ -306,13 +828,27 @@ export const TOOLS: ToolDefinition[] = [
 
 export const TOOLS_BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));
 
-/** Lo que se manda a la API de Anthropic: solo nombre, descripción y esquema. */
-export function toAnthropicTools(): Array<{
+/**
+ * Las herramientas que esta persona puede usar: las de los módulos activos de su empresa y los permisos de su rol. `null`
+ * en cualquiera de los dos = no se sabe (falló la consulta, o un banco de pruebas) y no se filtra por ese lado: el modelo
+ * verá un 403 o un PLUGIN_NOT_ACTIVE y el prompt ya le dice cómo contarlo.
+ */
+export function availableTools(permissions: string[] | null, plugins: Set<string> | null): ToolDefinition[] {
+  const all = permissions?.includes('*') ?? false;
+  return TOOLS.filter(
+    (t) =>
+      (!t.plugin || plugins === null || plugins.has(t.plugin)) &&
+      (!t.permission || permissions === null || all || permissions.includes(t.permission)),
+  );
+}
+
+/** Lo que se manda al modelo: solo nombre, descripción y esquema. */
+export function toAnthropicTools(tools: ToolDefinition[] = TOOLS): Array<{
   name: string;
   description: string;
   input_schema: ToolDefinition['inputSchema'];
 }> {
-  return TOOLS.map((t) => ({
+  return tools.map((t) => ({
     name: t.name,
     description: t.description,
     input_schema: t.inputSchema,

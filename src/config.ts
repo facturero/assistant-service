@@ -30,10 +30,32 @@ const envSchema = z.object({
    *                   `claude-*` y algunos de otras casas por el mismo camino.
    *
    * El tercero sí es otro protocolo, el de OpenAI, y lleva su propio adaptador:
-   *   - 'openai-compat' → Ollama en local, o las capas gratuitas de Groq,
+   *   - 'openai-compat' → vLLM u Ollama en local, o las capas gratuitas de Groq,
    *                       Gemini y OpenRouter. Exige `ASSISTANT_BASE_URL`.
    */
   ASSISTANT_PROVIDER: z.enum(['anthropic', 'opencode', 'openai-compat']).default('anthropic'),
+  /**
+   * Con 'openai-compat': qué servidor responde. Mismo protocolo, pero no apagan el razonamiento igual (ver
+   * `OpenAiCompatibleLlm`). 'ollama' sirve también para Groq, Gemini y OpenRouter, que aceptan `reasoning_effort`.
+   */
+  OPENAI_COMPAT_SERVER: z.enum(['ollama', 'vllm']).default('ollama'),
+  /**
+   * Con 'openai-compat': razonamiento en los turnos del chat. Sin poner, el modelo decide (gemma4 piensa). 'none' lo apaga:
+   * más rápido, pero los modelos pequeños suman peor. qwen3.5 en Ollama 0.32 necesita 'none': pensando, Ollama le deja la
+   * respuesta dentro de `reasoning` y `content` llega vacío. Medido con `npm run bench:llm` el 2026-11-24.
+   */
+  OPENAI_COMPAT_CHAT_REASONING: vacioEsAusente(z.enum(['none', 'low', 'medium', 'high']).optional()),
+
+  /**
+   * Con 'openai-compat': un segundo servidor del modelo para cuando el primero no responde (ver `FailoverLlm`). Hoy, la
+   * 4070 SUPER de respaldo de la 5070. Modelo, servidor y razonamiento heredan los del primero si no se ponen.
+   */
+  ASSISTANT_FALLBACK_BASE_URL: vacioEsAusente(z.string().url().optional()),
+  ASSISTANT_FALLBACK_MODEL: vacioEsAusente(z.string().optional()),
+  OPENAI_COMPAT_FALLBACK_SERVER: vacioEsAusente(z.enum(['ollama', 'vllm']).optional()),
+  OPENAI_COMPAT_FALLBACK_CHAT_REASONING: vacioEsAusente(z.enum(['none', 'low', 'medium', 'high']).optional()),
+  /** Cada cuánto se sondea cada servidor (`/models`). Con un caído, es lo que tarda en dejar de intentarlo. */
+  ASSISTANT_LLM_PROBE_INTERVAL_MS: z.coerce.number().int().min(0).default(10_000),
 
   /** Las claves viven aquí y solo aquí. Nunca salen hacia el navegador. */
   ANTHROPIC_API_KEY: vacioEsAusente(z.string().optional()),

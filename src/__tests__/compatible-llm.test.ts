@@ -142,6 +142,69 @@ describe('OpenAiCompatibleLlm — respuesta con forma fija', () => {
     expect(pedido.max_tokens).toBe(2000);
   });
 
+  it('con vLLM apaga el razonamiento en la plantilla: su `reasoning_effort` no admite "none" y respondería 400', async () => {
+    let pedido: any;
+    vi.stubGlobal(
+      'fetch',
+      responder({ choices: [{ message: { content: '{"a":1}' } }] }, (b) => (pedido = b)),
+    );
+    const vllm = new OpenAiCompatibleLlm({
+      baseURL: 'http://vllm:8000/v1',
+      model: 'crm-assistant',
+      maxTokens: 4000,
+      timeoutMs: 5000,
+      server: 'vllm',
+    });
+    await vllm.generate({ system: 's', prompt: 'p', schema: {} });
+
+    expect(pedido.reasoning_effort).toBeUndefined();
+    expect(pedido.chat_template_kwargs).toEqual({ enable_thinking: false });
+    expect(pedido.response_format).toMatchObject({ type: 'json_schema' });
+  });
+
+  it('rescata la respuesta que Ollama deja en `reasoning` con `content` vacío (qwen3.5 razonando)', async () => {
+    const turno = (message: Record<string, unknown>, finish_reason = 'stop') => ({ choices: [{ finish_reason, message }] });
+    const texto = async (payload: unknown) =>
+      (await llm(responder(payload)).complete({ system: 's', messages: [{ role: 'user', content: 'hola' }], tools: [] })).content;
+
+    expect(await texto(turno({ content: '', reasoning: 'Ya existe un cliente con ese RUC.' }))).toEqual([
+      { type: 'text', text: 'Ya existe un cliente con ese RUC.' },
+    ]);
+    // Con texto propio, el razonamiento no se enseña.
+    expect(await texto(turno({ content: 'Hola', reasoning: 'pensando…' }))).toEqual([{ type: 'text', text: 'Hola' }]);
+    // Cortado por longitud: es razonamiento a medias, no una respuesta.
+    expect(await texto(turno({ content: '', reasoning: 'Thinking Process: 1.' }, 'length'))).toEqual([]);
+    // Con llamada a herramienta, el razonamiento es el porqué de la llamada: tampoco se enseña.
+    const conLlamada = await texto(
+      turno({ content: '', reasoning: 'Voy a buscar', tool_calls: [{ id: 'c1', function: { name: 'listar_clientes', arguments: '{}' } }] }, 'tool_calls'),
+    );
+    expect(conLlamada).toEqual([{ type: 'tool_use', id: 'c1', name: 'listar_clientes', input: {} }]);
+  });
+
+  it('el razonamiento del chat solo se toca si se configura, y cada servidor a su manera', async () => {
+    const turno = { choices: [{ finish_reason: 'stop', message: { content: 'hola' } }] };
+    const pedir = async (opciones: Record<string, unknown>) => {
+      let pedido: any;
+      vi.stubGlobal('fetch', responder(turno, (b) => (pedido = b)));
+      await new OpenAiCompatibleLlm({ baseURL: 'http://x/v1', model: 'm', maxTokens: 100, timeoutMs: 5000, ...opciones }).complete({
+        system: 's',
+        messages: [{ role: 'user', content: 'hola' }],
+        tools: [],
+      });
+      return pedido;
+    };
+
+    // Sin configurar no se manda nada: es lo que había y gemma4 piensa (y suma mejor) así.
+    const libre = await pedir({});
+    expect(libre.reasoning_effort).toBeUndefined();
+    expect(libre.chat_template_kwargs).toBeUndefined();
+
+    expect((await pedir({ chatReasoning: 'none' })).reasoning_effort).toBe('none');
+    expect((await pedir({ chatReasoning: 'none', server: 'vllm' })).chat_template_kwargs).toEqual({ enable_thinking: false });
+    expect((await pedir({ chatReasoning: 'low' })).reasoning_effort).toBe('low');
+    expect((await pedir({ chatReasoning: 'high', server: 'vllm' })).chat_template_kwargs).toEqual({ enable_thinking: true });
+  });
+
   it('un contenido vacío se reintenta una vez; dos seguidos son un 503', async () => {
     const vacio = { choices: [{ message: { content: '' } }] };
     const bien = { choices: [{ message: { content: '{"a":1}' } }] };

@@ -14,7 +14,9 @@ jobs:
       contents: read
       packages: write
     env:
-      NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
+      # GITHUB_TOKEN y no el secreto NODE_AUTH_TOKEN (token personal): ese caducó el 2026-11-16 y rompió el `npm ci` con 401
+      # en chat-service. El `docker build` de abajo ya baja @facturero/outbox-relay con GITHUB_TOKEN: el paquete da acceso a este repo.
+      NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
       - name: Checkout
@@ -161,10 +163,17 @@ jobs:
           export REGISTRY=${REGISTRY}
           export IMAGE_NAME=${IMAGE_NAME}
           export IMAGE_TAG=${{ github.sha }}
+          # Los dos servidores del modelo viven fuera del cluster: vLLM en la RTX
+          # 5070 (principal) y en la 4070 SUPER (respaldo). Estos manifiestos les
+          # dan nombre DNS dentro de k8s y van ANTES del Deployment, que ya los
+          # nombra. Mientras la 5070 no tenga IP, su lista va vacia y atiende la
+          # 4070.
+          kubectl apply -f k8s/vllm-external.yaml
+          kubectl apply -f k8s/vllm-4070-external.yaml
           envsubst < k8s/deployment.yaml | kubectl apply -f -
           kubectl apply -f k8s/service.yaml
-          # Ollama vive fuera del cluster, en el PC con la GPU. Este manifiesto
-          # le da un nombre DNS dentro de k8s para que el Deployment no tenga
-          # que conocer su IP. Si algun dia Ollama entra al cluster, se borra.
+          # Ollama (PC de la 4070 SUPER) ya no lo usa el asistente, pero el
+          # Service `ollama` lo sigue usando el chat de la landing (presentacion).
+          # No se borra.
           kubectl apply -f k8s/ollama-external.yaml
           kubectl rollout status deployment assistant-service --timeout=180s

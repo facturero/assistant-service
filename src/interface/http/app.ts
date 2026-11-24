@@ -267,22 +267,38 @@ export function createApp(opts: {
  * Si alguna falla, el turno sigue con ese dato en blanco: quedarse sin nombre de
  * empresa es peor que quedarse sin asistente.
  */
+/** Códigos de los módulos activos, igual que los calcula el gateway (`status === 'active'`). `null` si no se pudo saber. */
+function activePlugins(response: { ok: boolean; body: unknown } | null): Set<string> | null {
+  if (!response?.ok || !Array.isArray(response.body)) return null;
+  return new Set(
+    (response.body as Array<{ status?: string; pluginCode?: string }>)
+      .filter((r) => r.status === 'active' && r.pluginCode)
+      .map((r) => r.pluginCode as string),
+  );
+}
+
 async function buildTurnContext(c: any, crm: CrmApiPort): Promise<TurnContext> {
   const bearerToken = c.get('bearerToken') as string;
   const locale = c.get('locale') as string;
 
-  const [me, org] = await Promise.all([
+  // La tercera llamada son los módulos activos: con ellos y los permisos del rol se le ofrecen al modelo solo las herramientas
+  // que esta persona puede usar (ver `availableTools`). Si falla, se ofrecen todas, como antes.
+  const [me, org, plugins] = await Promise.all([
     crm.call({ method: 'GET', path: '/auth/me', bearerToken }),
     crm.call({ method: 'GET', path: '/organizations/me', bearerToken }),
+    crm.call({ method: 'GET', path: '/organizations/me/plugins', bearerToken }).catch(() => null),
   ]);
   const profile = (me.ok ? me.body : {}) as Record<string, unknown>;
   const company = (org.ok ? org.body : {}) as Record<string, unknown>;
+  const permissionsHeader = c.req.header('X-Permissions') as string | undefined;
 
   return {
     organizationId: c.get('organizationId'),
     userId: c.get('userId'),
     bearerToken,
     locale,
+    permissions: permissionsHeader ? permissionsHeader.split(',').map((p) => p.trim()).filter(Boolean) : null,
+    plugins: activePlugins(plugins),
     organization: {
       // El nombre comercial es por el que la gente llama a su empresa; la razón
       // social es el de los papeles. Se prefiere el primero y se cae al segundo.

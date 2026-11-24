@@ -10,7 +10,8 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",
     "test": "vitest run",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "bench:llm": "tsx bench/llm-bench.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.124.0",
