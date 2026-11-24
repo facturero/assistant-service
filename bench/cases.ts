@@ -16,7 +16,7 @@ export interface Check {
   detail?: string;
 }
 
-export type Route = (query: Record<string, string>, body: unknown) => { status: number; body: unknown };
+export type Route = (query: Record<string, string>, body: unknown, path: string) => { status: number; body: unknown };
 
 /** La API del CRM con datos fijos. Apunta cada llamada para poder comprobar qué consultó el modelo. */
 export class FixtureCrm implements CrmApiPort {
@@ -36,7 +36,7 @@ export class FixtureCrm implements CrmApiPort {
     this.calls.push({ method: params.method, path: params.path, query, body: params.body });
     const hit = this.routes.find((r) => r.method === params.method && r.pattern.test(params.path));
     if (!hit) return { ok: false, status: 404, body: { code: 'NOT_FOUND', message: 'No existe' } };
-    const { status, body } = hit.route(query, params.body);
+    const { status, body } = hit.route(query, params.body, params.path);
     return { ok: status >= 200 && status < 300, status, body };
   }
 
@@ -386,8 +386,10 @@ export const CASES: BenchCase[] = [
       return [
         check('pide el resumen por producto', !!pidio, JSON.stringify(crm.calls.map((c) => c.query))),
         check('el primero es el taladro (899,00)', i('taladro') >= 0 && /899[.,]00/.test(r.reply)),
-        // Neto: taladro 899,00 · martillo 294,26 (100 + 49,78 + 144,48) · clavos 278,43 (200,43 + 78).
-        check('en orden: taladro, martillo, clavos', i('taladro') >= 0 && i('taladro') < i('martillo') && i('martillo') < i('clavos')),
+        // «Más vendidos» admite dos lecturas: por importe (taladro 899,00 · martillo 294,26 · clavos 278,43) o por unidades
+        // (clavos 70 · martillo 24 · taladro 10). Las dos valen si las cifras son las de la base.
+        check('cifras de los tres exactas', /294[.,]26/.test(r.reply) && /278[.,]43/.test(r.reply)),
+        check('orden por importe o por unidades', (i('taladro') < i('martillo') && i('martillo') < i('clavos')) || (i('clavos') < i('martillo') && i('martillo') < i('taladro'))),
         check('no propone escrituras', r.pendingActions.length === 0),
         enEspanol(r.reply),
       ];
@@ -440,6 +442,42 @@ export const CASES: BenchCase[] = [
       check('busca el producto', crm.called('GET', '/products')),
       check('pide su stock', crm.called('GET', '/stock/products/p-mart')),
       check('da el disponible (52)', /\b52\b/.test(r.reply)),
+      check('no propone escrituras', r.pendingActions.length === 0),
+    ],
+  },
+  {
+    kind: 'agent',
+    id: 'stock-varios',
+    description: 'Varios productos con varios datos cada uno: es donde el modelo tendía a responder con una tabla.',
+    message: '¿Cuánto stock tengo de mis productos?',
+    routes: {
+      'GET /products': () =>
+        ok({
+          items: [
+            { id: 'p-mart', name: 'Martillo de uña 16 oz', code: 'MART16', status: 'active' },
+            { id: 'p-clav', name: 'Clavos 1 kg', code: 'CLAV1K', status: 'active' },
+            { id: 'p-tal', name: 'Taladro percutor 600W', code: 'TAL600', status: 'active' },
+          ],
+          total: 3,
+        }),
+      'GET /stock': () =>
+        ok({
+          data: [
+            { productId: 'p-mart', warehouseCode: 'MATRIZ', quantityOnHand: '40.0000', quantityReserved: '6.0000', quantityAvailable: '34.0000' },
+            { productId: 'p-clav', warehouseCode: 'MATRIZ', quantityOnHand: '120.0000', quantityReserved: '0.0000', quantityAvailable: '120.0000' },
+            { productId: 'p-tal', warehouseCode: 'MATRIZ', quantityOnHand: '3.0000', quantityReserved: '1.0000', quantityAvailable: '2.0000' },
+          ],
+          total: 3,
+        }),
+      'GET /stock/products/:productId': (_q, _b, path) => {
+        const por: Record<string, [string, string, string]> = { 'p-mart': ['40', '6', '34'], 'p-clav': ['120', '0', '120'], 'p-tal': ['3', '1', '2'] };
+        const [total, reservado, disponible] = por[path.split('/').pop() ?? ''] ?? ['0', '0', '0'];
+        return ok({ totalOnHand: total + '.0000', totalReserved: reservado + '.0000', totalAvailable: disponible + '.0000', positions: [] });
+      },
+    },
+    check: (r) => [
+      check('nombra los tres productos', /martillo/i.test(r.reply) && /clavos/i.test(r.reply) && /taladro/i.test(r.reply)),
+      check('disponibles correctos (34, 120, 2)', /\b34\b/.test(r.reply) && /\b120\b/.test(r.reply) && /\b2\b/.test(r.reply)),
       check('no propone escrituras', r.pendingActions.length === 0),
     ],
   },

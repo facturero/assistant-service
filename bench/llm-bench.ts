@@ -181,6 +181,8 @@ async function runCase(target: Target, c: BenchCase, round: number, timeoutMs: n
       output = [result.reply, ...result.pendingActions.map((a) => `[propone ${a.toolName}] ${JSON.stringify(a.input)}`)].join('\n');
       checks = [
         { name: 'cierra el turno (sin agotar vueltas)', ok: !result.truncated },
+        // El panel del chat no dibuja tablas markdown: se veían las «|» sueltas (prueba en producción, 2026-11-24).
+        { name: 'sin tablas markdown', ok: !/^\s*\|.*\|\s*$/m.test(result.reply) },
         ...c.check(result, crm),
       ];
     } else {
