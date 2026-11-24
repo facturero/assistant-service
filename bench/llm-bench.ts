@@ -182,6 +182,8 @@ async function runCase(target: Target, c: BenchCase, round: number, timeoutMs: n
       checks = [
         { name: 'cierra el turno (sin agotar vueltas)', ok: !result.truncated },
         // Tablas y gráficos solo si la persona los pide (prompt, 2026-11-24): en una respuesta normal no deben aparecer.
+        // Ids internos fuera de los enlaces: no le dicen nada a la persona (prueba en producción, 2026-11-24).
+        { name: 'sin ids internos a la vista', ok: !/(?<![/\w-])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(result.reply) },
         ...(/tabla/i.test(c.message) ? [] : [{ name: 'sin tabla no pedida', ok: !/^\s*\|.*\|\s*$/m.test(result.reply) }]),
         ...(/gr[aá]f[ií]c/i.test(c.message) ? [] : [{ name: 'sin gráfico no pedido', ok: !/```\s*(grafico|gráfico|chart)/i.test(result.reply) }]),
         ...c.check(result, crm),

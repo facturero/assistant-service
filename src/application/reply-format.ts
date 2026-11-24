@@ -74,8 +74,42 @@ function chartsToLists(text: string): string {
   return out.join('\n');
 }
 
+const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+const IS_UUID = new RegExp(`^\\s*\`?${UUID}\`?\\s*$`, 'i');
+
+/**
+ * Los ids internos no le dicen nada a la persona, y el prompt pide no mostrarlos, pero el modelo los ponía igual como columna
+ * de una tabla o delante de un elemento (prueba en producción, 2026-11-24). Se quitan: las columnas que solo traen ids, el
+ * «(ID: …)» y el id suelto que encabeza un elemento de lista. Los ids dentro de un enlace (`/customers/<id>`) se quedan:
+ * van precedidos de «/» y son los que hacen funcionar el enlace.
+ */
+function stripInternalIds(text: string): string {
+  const lines = text.split('\n');
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (ROW.test(line) && i + 1 < lines.length && SEPARATOR.test(lines[i + 1]!)) {
+      let j = i + 2;
+      while (j < lines.length && ROW.test(lines[j]!)) j++;
+      const rows = lines.slice(i + 2, j).map(cells);
+      const head = cells(line);
+      const keep = head.map((_, k) => !(rows.length > 0 && rows.every((r) => IS_UUID.test(r[k] ?? ''))));
+      const pick = (cs: string[]) => `| ${cs.filter((_, k) => keep[k]).join(' | ')} |`;
+      out.push(pick(head), `|${keep.filter(Boolean).map(() => '---').join('|')}|`, ...rows.map(pick));
+      i = j - 1;
+      continue;
+    }
+    out.push(line);
+  }
+  return out
+    .join('\n')
+    .replace(new RegExp(`\\s*\\((?:id|ID|Id)\\s*:?\\s*\`?${UUID}\`?\\)`, 'g'), '')
+    .replace(new RegExp(`(?<![/\\w-])(?:id|ID|Id)\\s*:\\s*\`?${UUID}\`?,?\\s*`, 'g'), '')
+    .replace(new RegExp(`^(\\s*[-*]\\s+)\`?${UUID}\`?\\s*[:\\-–]\\s*`, 'gim'), '$1');
+}
+
 export function enforceRequestedFormat(reply: string, userText: string): string {
-  let text = reply;
+  let text = stripInternalIds(reply);
   if (!asksForChart(userText)) text = chartsToLists(text);
   if (!asksForTable(userText)) text = tablesToLists(text);
   return text;

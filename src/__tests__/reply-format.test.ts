@@ -28,6 +28,15 @@ describe('tablas y gráficos solo si se piden', () => {
     expect(enforceRequestedFormat(GRAFICO, 'grafícame las ventas')).toBe(GRAFICO);
   });
 
+  it('quita los ids internos: columnas de solo ids, «(ID: …)» y el id que encabeza un elemento; no los de los enlaces', () => {
+    const id = '54817d92-3272-458b-afa5-fd98c4ffd122';
+    const tabla = `| ID | Nombre | Estado |\n|---|---|---|\n| ${id} | PRUEBA Proveedor | activo |`;
+    expect(enforceRequestedFormat(tabla, 'Dame una tabla de proveedores')).toBe('| Nombre | Estado |\n|---|---|\n| PRUEBA Proveedor | activo |');
+    expect(enforceRequestedFormat(`- ${id}: Nombre PRUEBA Proveedor, Estado activo`, 'proveedores')).toBe('- Nombre PRUEBA Proveedor, Estado activo');
+    expect(enforceRequestedFormat(`- PRUEBA Proveedor (ID: ${id}), activo`, 'proveedores')).toBe('- PRUEBA Proveedor, activo');
+    expect(enforceRequestedFormat(`Mira su [ficha](/customers/${id}).`, 'cliente')).toBe(`Mira su [ficha](/customers/${id}).`);
+  });
+
   it('el agente lo aplica con el último mensaje de la persona, antes de guardar y devolver', async () => {
     const repos = createInMemoryRepositories();
     const llm = new ScriptedLlm([{ content: [textBlock(TABLA)] }]);
