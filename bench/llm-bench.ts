@@ -36,6 +36,7 @@ import { ProjectAssistant } from '../src/application/project-ai';
 import { LlmMessage, LlmPort, LlmTurn, StructuredLlmPort } from '../src/application/ports';
 import { ChatReasoning, OpenAiCompatibleLlm, OpenAiCompatibleServer } from '../src/infrastructure/openai/compatible-llm';
 import { createInMemoryRepositories } from '../src/__tests__/helpers';
+import { Conversation, Message } from '../src/domain/entities';
 import { BenchCase, CASES, Check, FixtureCrm, TODAY } from './cases';
 
 interface Target {
@@ -176,9 +177,38 @@ async function runCase(target: Target, c: BenchCase, round: number, timeoutMs: n
 
   try {
     if (c.kind === 'agent') {
-      const agent = new Agent(repos, llm, crm, { maxIterations: 8, monthlyTokenLimit: 0 });
-      const result: TurnResult = await agent.startOrContinue({ conversationId: null, text: c.message, ctx: turnCtx });
-      output = [result.reply, ...result.pendingActions.map((a) => `[propone ${a.toolName}] ${JSON.stringify(a.input)}`)].join('\n');
+      // La misma ventana que en producción (vLLM, --max-model-len 16384, ANTHROPIC_MAX_TOKENS=4000): así un historial largo
+      // se compacta como allí y no da un 400 que en producción no pasaría (ni al revés).
+      const agent = new Agent(repos, llm, crm, { maxIterations: 8, monthlyTokenLimit: 0, contextTokens: 16_384, maxOutputTokens: 4000 });
+      let conversationId: string | null = null;
+      if (c.history?.length) {
+        const conversation = Conversation.create({ organizationId: ORG, userId: turnCtx.userId });
+        await repos.conversations.save(conversation);
+        for (const [question, answer] of c.history) {
+          await repos.messages.save(Message.create({ conversationId: conversation.id, role: 'user', content: [{ type: 'text', text: question }] }));
+          await repos.messages.save(Message.create({ conversationId: conversation.id, role: 'assistant', content: [{ type: 'text', text: answer }] }));
+        }
+        conversationId = conversation.id;
+      }
+      const first: TurnResult = await agent.startOrContinue({ conversationId, text: c.message, ctx: turnCtx });
+      let result = first;
+      const steps = [first];
+      // Pulsar la tarjeta que pida el caso, una por una, hasta que no quede ninguna (máx. 4: ningún caso propone más).
+      for (let i = 0; c.decide !== undefined && result.pendingActions.length > 0 && i < 4; i++) {
+        result = await agent.decideAction({ actionId: result.pendingActions[0]!.id, approve: c.decide, ctx: turnCtx });
+        steps.push(result);
+      }
+      output = steps
+        .map((t, i) =>
+          [
+            i === 0 ? '' : `[${c.decide ? 'confirma' : 'rechaza'}]`,
+            t.reply,
+            ...t.pendingActions.map((a) => `[propone ${a.toolName}] «${a.summary}» ${JSON.stringify(a.input)}`),
+          ]
+            .filter(Boolean)
+            .join('\n'),
+        )
+        .join('\n');
       checks = [
         { name: 'cierra el turno (sin agotar vueltas)', ok: !result.truncated },
         // Tablas y gráficos solo si la persona los pide (prompt, 2026-11-24): en una respuesta normal no deben aparecer.
@@ -186,7 +216,7 @@ async function runCase(target: Target, c: BenchCase, round: number, timeoutMs: n
         { name: 'sin ids internos a la vista', ok: !/(?<![/\w-])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(result.reply) },
         ...(/tabla/i.test(c.message) ? [] : [{ name: 'sin tabla no pedida', ok: !/^\s*\|.*\|\s*$/m.test(result.reply) }]),
         ...(/gr[aá]f[ií]c/i.test(c.message) ? [] : [{ name: 'sin gráfico no pedido', ok: !/```\s*(grafico|gráfico|chart)/i.test(result.reply) }]),
-        ...c.check(result, crm),
+        ...c.check(result, crm, first),
       ];
     } else {
       const projects = new ProjectAssistant(repos, llm, crm, { monthlyTokenLimit: 0 });

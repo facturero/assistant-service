@@ -98,6 +98,11 @@ const envSchema = z.object({
   /** Tope de vueltas del bucle antes de rendirse. */
   AGENT_MAX_ITERATIONS: z.coerce.number().int().min(1).max(20).default(8),
   /**
+   * Ventana del modelo en tokens (prompt + respuesta). El historial se compacta para que quepa (ver context-window.ts). Sin
+   * poner: 16384 con vLLM (su `--max-model-len`), 8192 con Ollama (los alias con `num_ctx 8192`) y 200000 con Anthropic.
+   */
+  ASSISTANT_CONTEXT_TOKENS: vacioEsAusente(z.coerce.number().int().min(2048).optional()),
+  /**
    * Tokens al mes por organización. Va incluido en la plataforma, así que el
    * coste lo paga la casa: el límite evita que una organización se lleve por
    * delante el margen de todas. 0 = sin límite.

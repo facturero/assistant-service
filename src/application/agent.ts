@@ -3,6 +3,7 @@ import { Repositories } from '../domain/repositories';
 import {
   ActionAlreadyDecidedError,
   ActionNotFoundError,
+  ContextTooLongError,
   ConversationNotFoundError,
   UnknownToolError,
   UsageLimitReachedError,
@@ -11,6 +12,7 @@ import { availableTools, isBillingWrite, summarizeAction, toAnthropicTools, TOOL
 import { CrmApiPort, LlmMessage, LlmPort } from './ports';
 import { buildSystemPrompt, OrganizationContext } from './prompt';
 import { enforceRequestedFormat } from './reply-format';
+import { CompactionStage, ContextOverflowError, estimateTextTokens, fitHistory } from './context-window';
 
 export interface TurnContext {
   organizationId: string;
@@ -32,6 +34,12 @@ export interface TurnResult {
   pendingActions: Array<{ id: string; toolName: string; summary: string; input: Record<string, unknown> }>;
   /** Se llegó al tope de vueltas sin que el modelo cerrara el turno. */
   truncated: boolean;
+  /**
+   * Para que quepa en la ventana del modelo se dejaron fuera los turnos más antiguos: el asistente ya no los recuerda. El
+   * chat lo avisa y sugiere empezar otra conversación. Quitar solo los resultados viejos del CRM no cuenta: no se pierde nada
+   * de lo que se habló.
+   */
+  contextTrimmed: boolean;
 }
 
 export interface AgentOptions {
@@ -39,7 +47,14 @@ export interface AgentOptions {
   maxIterations: number;
   /** Tokens al mes por organización. 0 = sin límite. */
   monthlyTokenLimit: number;
+  /** Ventana del modelo (prompt + respuesta). Sin poner, el historial se manda entero (los tests, que no tienen modelo). */
+  contextTokens?: number;
+  /** Lo que se reserva para la respuesta: el `max_tokens` que se le pide al modelo. */
+  maxOutputTokens?: number;
 }
+
+/** Holgura sobre la estimación: la plantilla de herramientas de cada modelo añade texto que aquí no se ve. */
+const CONTEXT_SAFETY_TOKENS = 300;
 
 /**
  * Reintentos de la red de seguridad para escrituras "anunciadas en texto".
@@ -219,6 +234,7 @@ export class Agent {
         reply: '',
         pendingActions: stillPending.map(describe),
         truncated: false,
+        contextTrimmed: false,
       };
     }
 
@@ -279,9 +295,32 @@ export class Agent {
     let correction: string | null = null;
     let corrections = 0;
 
+    // Lo que queda para el historial: la ventana menos la respuesta, el prompt y las herramientas, que viajan siempre.
+    const budget =
+      this.options.contextTokens === undefined
+        ? Number.POSITIVE_INFINITY
+        : this.options.contextTokens -
+          // Un `max_tokens` de 16000 (el valor por defecto, pensado para Anthropic) con Ollama a 8192 dejaría el presupuesto en
+          // negativo y ningún turno cabría: la reserva nunca pasa de un tercio de la ventana.
+          Math.min(this.options.maxOutputTokens ?? 0, Math.floor(this.options.contextTokens / 3)) -
+          estimateTextTokens(system) -
+          estimateTextTokens(JSON.stringify(tools)) -
+          CONTEXT_SAFETY_TOKENS;
+    let stage: CompactionStage = 'none';
+
     for (let iteration = 0; iteration < this.options.maxIterations; iteration++) {
       const history = await this.repos.messages.listByConversation(conversation.id);
-      const messages = history.map(toLlmMessage);
+      // La corrección se suma DESPUÉS de recortar: es texto de usuario y, metida antes, contaría como el turno actual y
+      // dejaría sin herramientas al turno de verdad.
+      let fitted;
+      try {
+        fitted = fitHistory(history.map(toLlmMessage), budget - (correction ? estimateTextTokens(correction) + 8 : 0));
+      } catch (error) {
+        if (error instanceof ContextOverflowError) throw new ContextTooLongError();
+        throw error;
+      }
+      if (fitted.stage === 'dropped' || (fitted.stage === 'tools' && stage === 'none')) stage = fitted.stage;
+      const messages = fitted.messages;
       if (correction) {
         messages.push({ role: 'user', content: [{ type: 'text', text: correction }] });
         correction = null;
@@ -326,6 +365,7 @@ export class Agent {
             'No puedo ayudarte con eso. Si crees que es un error, reformúlalo o pídeselo a alguien de tu equipo.',
           pendingActions: [],
           truncated: false,
+          contextTrimmed: stage === 'dropped',
         };
       }
 
@@ -345,6 +385,7 @@ export class Agent {
           reply: assistantMessage.text,
           pendingActions: [],
           truncated: false,
+          contextTrimmed: stage === 'dropped',
         };
       }
 
@@ -352,16 +393,43 @@ export class Agent {
       // las escrituras y no se ejecuta nada más hasta que haya decisión humana.
       const writes = toolUses.filter((b) => TOOLS_BY_NAME.get(String(b.name))?.risk === 'write');
       if (writes.length > 0) {
-        const proposed: PendingAction[] = [];
+        // Cada escritura se revisa contra el CRM antes de enseñar la tarjeta (`prepare`). Si alguna no puede salir bien, no
+        // se propone ninguna: el error vuelve al modelo y corrige en la vuelta siguiente, sin que la persona vea una tarjeta
+        // condenada a fallar.
+        const prepared: Array<{ block: ContentBlock; tool: ToolDefinition; input: Record<string, unknown>; summary: string }> = [];
+        const rejected = new Map<string, string>();
         for (const block of writes) {
           const tool = TOOLS_BY_NAME.get(String(block.name))!;
-          const input = (block.input ?? {}) as Record<string, unknown>;
+          const p = await this.prepareAction(tool, (block.input ?? {}) as Record<string, unknown>, ctx);
+          if ('error' in p) rejected.set(String(block.id), p.error);
+          else prepared.push({ block, tool, ...p });
+        }
+        if (rejected.size > 0) {
+          const results: ContentBlock[] = [];
+          for (const block of toolUses) {
+            const id = String(block.id);
+            const tool = TOOLS_BY_NAME.get(String(block.name));
+            if (rejected.has(id)) results.push(resultBlock(id, { error: rejected.get(id) }, true));
+            else if (!tool) results.push(resultBlock(id, { error: `La herramienta ${String(block.name)} no existe.` }, true));
+            else if (tool.risk === 'write') {
+              results.push(resultBlock(id, { error: 'No se propuso porque otra acción de este turno tenía un error. Corrígela y vuelve a proponer las dos.' }, true));
+            } else {
+              const response = await this.callTool(tool, (block.input ?? {}) as Record<string, unknown>, ctx);
+              results.push(resultBlock(id, response.body, !response.ok));
+            }
+          }
+          await this.repos.messages.save(Message.create({ conversationId: conversation.id, role: 'user', content: results }));
+          continue;
+        }
+
+        const proposed: PendingAction[] = [];
+        for (const { block, tool, input, summary } of prepared) {
           const action = PendingAction.propose({
             conversationId: conversation.id,
             toolUseId: String(block.id),
             toolName: tool.name,
             input,
-            summary: summarizeAction(tool, input),
+            summary,
           });
           await this.repos.actions.save(action);
           await this.audit('assistant.action.proposed', ctx, action, conversation.id);
@@ -372,6 +440,7 @@ export class Agent {
           reply: assistantMessage.text,
           pendingActions: proposed.map(describe),
           truncated: false,
+          contextTrimmed: stage === 'dropped',
         };
       }
 
@@ -398,7 +467,35 @@ export class Agent {
         'Me he quedado sin pasos para resolver esto. Prueba a pedírmelo por partes o con más detalle.',
       pendingActions: [],
       truncated: true,
+      contextTrimmed: stage === 'dropped',
     };
+  }
+
+  /**
+   * Revisa una escritura antes de proponerla (ver `prepare` en tools.ts): solo lecturas, con el token del usuario. Si la
+   * revisión no se puede hacer o revienta, se propone tal cual con el resumen simple: una tarjeta menos clara es mejor que
+   * dejar a la persona sin poder hacer lo que pidió.
+   */
+  private async prepareAction(
+    tool: ToolDefinition,
+    input: Record<string, unknown>,
+    ctx: TurnContext,
+  ): Promise<{ input: Record<string, unknown>; summary: string } | { error: string }> {
+    if (tool.prepare) {
+      try {
+        const p = await tool.prepare(input, {
+          call: (method, path, options = {}) =>
+            method === 'GET'
+              ? this.crm.call({ method, path, query: options.query ?? {}, bearerToken: ctx.bearerToken })
+              : Promise.resolve({ ok: false, status: 405, body: { code: 'READ_ONLY' } }),
+        });
+        if (p && 'error' in p) return p;
+        if (p) return { input: p.input, summary: p.summary ?? summarizeAction(tool, p.input) };
+      } catch (err) {
+        console.error(`[assistant] no se pudo revisar ${tool.name}; se propone tal cual:`, err);
+      }
+    }
+    return { input, summary: summarizeAction(tool, input) };
   }
 
   /** Traduce una herramienta a la llamada HTTP real, con el token del usuario. */

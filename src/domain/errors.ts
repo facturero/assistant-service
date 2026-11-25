@@ -53,3 +53,17 @@ export class AssistantUnavailableError extends DomainError {
     super(`El asistente no está disponible: ${detail}`, 'ASSISTANT_UNAVAILABLE', 503);
   }
 }
+
+/**
+ * El turno actual no cabe en la ventana del modelo ni dejando fuera todo el historial anterior: una consulta que trae una
+ * lista enorme o un texto pegado gigante. 422 y no 503: el servicio está bien, lo que hay que cambiar es la petición.
+ */
+export class ContextTooLongError extends DomainError {
+  constructor() {
+    super(
+      'Esta consulta trae más datos de los que el asistente puede leer de una vez. Pídela más acotada, por ejemplo con un filtro o un rango de fechas.',
+      'ASSISTANT_CONTEXT_TOO_LONG',
+      422,
+    );
+  }
+}

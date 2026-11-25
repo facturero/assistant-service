@@ -46,9 +46,16 @@ async function main(): Promise<void> {
   // Un proveedor externo (Anthropic) no se sondea: si cae, el envío falla con 503 y el chat lo dice en ese momento.
   const health: LlmHealthPort = compat ?? { status: () => ({ available: true, servers: 0, healthy: 0, checkedAt: null }) };
 
+  // La ventana de cada servidor: vLLM arranca con --max-model-len 16384 (vllm-external.yaml) y los alias de Ollama con
+  // num_ctx 8192. Pasarse no avisa igual en los dos: vLLM responde 400 y Ollama corta el principio sin decir nada.
+  const contextTokens =
+    config.ASSISTANT_CONTEXT_TOKENS ??
+    (provider.name !== 'openai-compat' ? 200_000 : config.OPENAI_COMPAT_SERVER === 'vllm' ? 16_384 : 8_192);
   const agent = new Agent(repos, llm, crm, {
     maxIterations: config.AGENT_MAX_ITERATIONS,
     monthlyTokenLimit: config.ASSISTANT_MONTHLY_TOKEN_LIMIT,
+    contextTokens,
+    maxOutputTokens: config.ANTHROPIC_MAX_TOKENS,
   });
 
   // Los botones de IA de Proyectos usan el mismo modelo y el mismo tope mensual que el chat.

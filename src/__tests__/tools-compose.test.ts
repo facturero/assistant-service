@@ -122,3 +122,76 @@ describe('agente — una compuesta aprobada pasa por execute con el token del us
     expect(post?.body).toEqual({ name: 'Martillo', type: 'good', price: '12.50', currencyCode: 'USD', establishmentIds: ['e1'] });
   });
 });
+
+describe('revisión de escrituras antes de la tarjeta (prepare)', () => {
+  const ROLES = [{ id: 'r-vend', name: 'Vendedor' }, { id: 'r-bod', name: 'Bodeguero' }];
+  const invitar = TOOLS_BY_NAME.get('invitar_empleado')!;
+
+  it('invitar_empleado: la tarjeta dice el nombre del rol', async () => {
+    const { api } = fakeApi({ 'GET /roles': ROLES });
+    expect(await invitar.prepare!({ email: 'ana@x.ec', roleIds: ['r-vend'] }, api)).toEqual({
+      input: { email: 'ana@x.ec', roleIds: ['r-vend'] },
+      summary: 'Invitar a ana@x.ec con el rol Vendedor',
+    });
+    expect(await invitar.prepare!({ email: 'ana@x.ec', roleIds: ['r-vend', 'r-bod'] }, api)).toMatchObject({
+      summary: 'Invitar a ana@x.ec con los roles Vendedor, Bodeguero',
+    });
+  });
+
+  it('invitar_empleado: acepta el rol por su nombre y lo pasa a id', async () => {
+    const { api } = fakeApi({ 'GET /roles': ROLES });
+    expect(await invitar.prepare!({ email: 'ana@x.ec', roleIds: ['vendedor'] }, api)).toMatchObject({ input: { roleIds: ['r-vend'] } });
+  });
+
+  it('invitar_empleado: un rol inventado es un error con la lista de roles, no una tarjeta', async () => {
+    const { api } = fakeApi({ 'GET /roles': ROLES });
+    const r = (await invitar.prepare!({ email: 'ana@x.ec', roleIds: ['vendor'] }, api)) as { error: string };
+    expect(r.error).toContain('«vendor»');
+    expect(r.error).toContain('Vendedor (id r-vend)');
+  });
+
+  it('crear_rol: un permiso que no está en el catálogo es un error', async () => {
+    const { api } = fakeApi({ 'GET /permissions': [{ code: 'customer:read' }, { code: 'product:read' }] });
+    const tool = TOOLS_BY_NAME.get('crear_rol')!;
+    expect(await tool.prepare!({ name: 'Cajero', permissions: ['customer:read'] }, api)).toEqual({ input: { name: 'Cajero', permissions: ['customer:read'] } });
+    expect(await tool.prepare!({ name: 'Cajero', permissions: ['customers:view'] }, api)).toEqual({
+      error: 'Estos permisos no existen: customers:view. Usa solo códigos tal como los devuelve listar_permisos.',
+    });
+  });
+
+  it('crear_cliente: con la misma identificación ya registrada, no hay tarjeta', async () => {
+    const tool = TOOLS_BY_NAME.get('crear_cliente')!;
+    const { api, calls } = fakeApi({ 'GET /customers': { items: [{ businessName: 'Ferretería El Clavo S.A.', identification: '1790012345001' }], total: 1 } });
+    expect(await tool.prepare!({ businessName: 'Ferretería El Clavo', type: 'company', identification: '1790012345001' }, api)).toEqual({
+      error: 'Ya existe el cliente «Ferretería El Clavo S.A.» con la identificación 1790012345001. No lo crees de nuevo: díselo a la persona.',
+    });
+    expect(calls[0]!.query).toEqual({ search: '1790012345001' });
+    // Un número que solo contiene al buscado (LIKE) no es el mismo cliente.
+    const otro = fakeApi({ 'GET /customers': { items: [{ businessName: 'Otro', identification: '17900123450019' }], total: 1 } });
+    expect(await tool.prepare!({ businessName: 'X', type: 'company', identification: '1790012345001' }, otro.api)).toBeNull();
+    // Sin identificación no se comprueba: dos personas pueden llamarse igual.
+    expect(await tool.prepare!({ businessName: 'Juan Pérez', type: 'person' }, otro.api)).toBeNull();
+  });
+
+  it('agente: si no puede leer los roles, propone con el resumen simple', async () => {
+    const crm = new FakeCrmApi(() => ({ ok: false, status: 403, body: { code: 'FORBIDDEN' } }));
+    const llm = new ScriptedLlm([
+      { content: [toolUseBlock('tu_1', 'invitar_empleado', { email: 'ana@x.ec', roleIds: ['r-vend'] })], stopReason: 'tool_use' },
+    ]);
+    const r = await new Agent(createInMemoryRepositories(), llm, crm, { maxIterations: 4, monthlyTokenLimit: 0 }).startOrContinue({ conversationId: null, text: 'Invita a ana@x.ec', ctx });
+    expect(r.pendingActions[0]?.summary).toBe('Invitar a ana@x.ec con 1 rol(es) asignado(s)');
+  });
+
+  it('agente: un rol inventado vuelve al modelo, que corrige, y la tarjeta sale con el rol bueno', async () => {
+    const crm = new FakeCrmApi((path) => (path === '/roles' ? { ok: true, status: 200, body: ROLES } : { ok: true, status: 200, body: {} }));
+    const llm = new ScriptedLlm([
+      { content: [toolUseBlock('tu_1', 'invitar_empleado', { email: 'ana@x.ec', roleIds: ['vendor'] })], stopReason: 'tool_use' },
+      { content: [toolUseBlock('tu_2', 'invitar_empleado', { email: 'ana@x.ec', roleIds: ['r-vend'] })], stopReason: 'tool_use' },
+    ]);
+    const r = await new Agent(createInMemoryRepositories(), llm, crm, { maxIterations: 4, monthlyTokenLimit: 0 }).startOrContinue({ conversationId: null, text: 'Invita a ana@x.ec como vendedor', ctx });
+    expect(r.pendingActions).toHaveLength(1);
+    expect(r.pendingActions[0]).toMatchObject({ summary: 'Invitar a ana@x.ec con el rol Vendedor', input: { roleIds: ['r-vend'] } });
+    expect(JSON.stringify(llm.calls[1]!.messages)).toContain('No existe ningún rol');
+    expect(crm.calls.every((c) => c.method === 'GET')).toBe(true);
+  });
+});

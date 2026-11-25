@@ -85,6 +85,19 @@ export interface ToolDefinition {
    * describir lo que de verdad va a pasar, no lo que el modelo dice que pasará.
    */
   summarize?: (input: Record<string, unknown>) => string;
+  /**
+   * Revisa una escritura contra el CRM ANTES de enseñar la tarjeta, con lecturas (GET). Devuelve:
+   * - `{ input, summary }`: el input ya corregido (un rol por su nombre pasa a su id) y la frase de la tarjeta con nombres,
+   *   no ids: quien confirma tiene que saber a qué dice que sí.
+   * - `{ error }`: la escritura no puede salir bien (un rol que no existe). No se enseña tarjeta: el error vuelve al modelo
+   *   como resultado de la herramienta y corrige en la misma conversación. Pasó en el banco del 2026-11-25: Qwen inventó
+   *   el id `vendor` sin consultar los roles, y la tarjeta («con 1 rol(es)») no dejaba verlo.
+   * - `null`: no se pudo comprobar (sin permiso de lectura, por ejemplo). Se propone tal cual, con `summarize`.
+   */
+  prepare?: (
+    input: Record<string, unknown>,
+    api: ToolApi,
+  ) => Promise<{ input: Record<string, unknown>; summary?: string } | { error: string } | null>;
 
   /**
    * Recorta la respuesta de la API antes de que entre en la conversación.
@@ -100,6 +113,20 @@ export interface ToolDefinition {
    */
   trim?: (body: unknown) => unknown;
 }
+
+/**
+ * Las filas de una respuesta de lista (arreglo o página con `items`/`data`). `null` si la llamada falló, si no es una lista o
+ * si viene vacía: ninguna empresa tiene cero roles ni un catálogo de permisos vacío, así que eso no prueba que el rol no
+ * exista, solo que no se pudo comprobar.
+ */
+function listRows(r: ToolResponse): Array<Record<string, any>> | null {
+  if (!r.ok) return null;
+  const b = r.body as Record<string, any>;
+  const rows = Array.isArray(b) ? b : Array.isArray(b?.items) ? b.items : Array.isArray(b?.data) ? b.data : null;
+  return rows && rows.length > 0 ? rows : null;
+}
+
+const normalizeName = (s: string) => s.normalize('NFD').replace(/\p{M}/gu, '').trim().toLowerCase();
 
 const str = (description: string) => ({ type: 'string', description });
 const num = (description: string) => ({ type: 'number', description });
@@ -826,6 +853,18 @@ export const TOOLS: ToolDefinition[] = [
       const perms = Array.isArray(input.permissions) ? input.permissions : [];
       return `Crear el rol "${input.name}" con ${perms.length} permiso(s): ${perms.join(', ')}`;
     },
+    // Un código inventado (`customers:view`) haría fallar la creación o, peor, crearía un rol que no sirve para nada.
+    prepare: async (input, api) => {
+      const rows = listRows(await api.call('GET', '/permissions'));
+      if (!rows) return null;
+      const catalog = new Set(rows.map((r) => String(r.code)));
+      const perms = Array.isArray(input.permissions) ? input.permissions.map(String) : [];
+      const unknown = perms.filter((p) => !catalog.has(p));
+      if (unknown.length > 0) {
+        return { error: `Estos permisos no existen: ${unknown.join(', ')}. Usa solo códigos tal como los devuelve listar_permisos.` };
+      }
+      return { input };
+    },
   },
   {
     name: 'invitar_empleado',
@@ -842,7 +881,7 @@ export const TOOLS: ToolDefinition[] = [
         roleIds: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Identificadores de los roles que se le asignan',
+          description: 'Ids de los roles que se le asignan, de listar_roles (también vale el nombre exacto del rol)',
         },
       },
       required: ['email', 'roleIds'],
@@ -851,6 +890,29 @@ export const TOOLS: ToolDefinition[] = [
     summarize: (input) => {
       const roles = Array.isArray(input.roleIds) ? input.roleIds.length : 0;
       return `Invitar a ${input.email} con ${roles} rol(es) asignado(s)`;
+    },
+    prepare: async (input, api) => {
+      const rows = listRows(await api.call('GET', '/roles'));
+      if (!rows) return null;
+      const wanted = Array.isArray(input.roleIds) ? input.roleIds.map(String) : [];
+      const catalog = rows.map((r) => `${r.name} (id ${r.id})`).join(', ');
+      if (wanted.length === 0) return { error: `Falta el rol. Roles de la empresa: ${catalog}.` };
+      const found: Array<Record<string, any>> = [];
+      const unknown: string[] = [];
+      for (const w of wanted) {
+        // Por id, o por nombre sin importar mayúsculas ni tildes: «vendedor» es el rol Vendedor.
+        const hit = rows.find((r) => String(r.id) === w) ?? rows.find((r) => normalizeName(String(r.name ?? '')) === normalizeName(w));
+        if (hit) found.push(hit);
+        else unknown.push(w);
+      }
+      if (unknown.length > 0) {
+        return { error: `No existe ningún rol «${unknown.join('», «')}». Roles de la empresa: ${catalog}. Usa el id exacto de uno de ellos.` };
+      }
+      const names = found.map((r) => String(r.name));
+      return {
+        input: { ...input, roleIds: found.map((r) => String(r.id)) },
+        summary: `Invitar a ${input.email} con ${names.length > 1 ? 'los roles' : 'el rol'} ${names.join(', ')}`,
+      };
     },
   },
   {
@@ -875,6 +937,18 @@ export const TOOLS: ToolDefinition[] = [
       // `type` lo exige customer-service: sin él, confirmar daba siempre 422 (revisado contra su validador, 2026-11-25).
       required: ['businessName', 'type'],
       additionalProperties: false,
+    },
+    // La descripción ya pide buscar antes, pero Qwen a veces no lo hace (banco del 2026-11-25, `cliente-duplicado`): la
+    // comprobación va aquí, donde no depende del modelo. Solo con identificación: dos «Juan Pérez» pueden ser personas distintas.
+    prepare: async (input, api) => {
+      const id = typeof input.identification === 'string' ? input.identification.trim() : '';
+      if (!id) return null;
+      const rows = listRows(await api.call('GET', '/customers', { query: { search: id } }));
+      const same = rows?.find((r) => String(r.identification ?? '').trim() === id);
+      if (same) {
+        return { error: `Ya existe el cliente «${same.businessName}» con la identificación ${id}. No lo crees de nuevo: díselo a la persona.` };
+      }
+      return null;
     },
     summarize: (input) =>
       `Crear el cliente "${input.businessName}" (${input.type === 'company' ? 'empresa' : 'persona'})${input.identification ? ` con identificación ${input.identification}` : ''}`,

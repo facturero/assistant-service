@@ -91,7 +91,7 @@ describe('el asistente deja huella en la bitácora', () => {
     await agent.decideAction({ actionId: turn.pendingActions[0].id, approve: false, ctx });
 
     expect(repos.__events.some((e) => e.type === 'assistant.action.rejected')).toBe(true);
-    expect(crm.calls).toHaveLength(0);
+    expect(crm.calls.filter((c) => c.method !== 'GET')).toHaveLength(0);
   });
 
   it('si la bitácora falla, la conversación sigue y la acción se ejecuta igual', async () => {
@@ -108,7 +108,7 @@ describe('el asistente deja huella en la bitácora', () => {
     expect(turn.pendingActions).toHaveLength(1);
 
     await expect(agent.decideAction({ actionId: turn.pendingActions[0].id, approve: true, ctx })).resolves.toBeTruthy();
-    expect(crm.calls).toHaveLength(1);
+    expect(crm.calls.filter((c) => c.method !== 'GET')).toHaveLength(1);
   });
 
   it('sin outbox configurado (RabbitMQ apagado) el asistente funciona igual', async () => {

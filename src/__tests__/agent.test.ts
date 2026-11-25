@@ -168,7 +168,8 @@ describe('Agent — escrituras con confirmación', () => {
     });
 
     expect(llm.calls).toHaveLength(2);
-    expect(crm.calls).toHaveLength(0);
+    // Nada escrito. Leer /roles sí: la tarjeta pone el nombre del rol en vez de su id.
+    expect(crm.calls.filter((c) => c.method !== 'GET')).toHaveLength(0);
     expect(result.pendingActions).toHaveLength(1);
     // La corrección viajó en la llamada intermedia, no en el historial.
     expect(JSON.stringify(llm.calls[1].messages)).toContain('Corrección');
@@ -264,7 +265,8 @@ describe('Agent — escrituras con confirmación', () => {
     expect(result.pendingActions[0].summary).toContain('Cajero');
     expect(result.pendingActions[0].summary).toContain('invoice:create');
     // Lo importante: NADA se llamó contra la API.
-    expect(crm.calls).toHaveLength(0);
+    // Escrituras: ninguna. Las lecturas de la revisión previa (roles, permisos) no cuentan.
+    expect(crm.calls.filter((c) => c.method !== 'GET')).toHaveLength(0);
   });
 
   it('al confirmar, ejecuta la llamada real y deja que el modelo cierre el turno', async () => {
@@ -290,9 +292,9 @@ describe('Agent — escrituras con confirmación', () => {
       ctx,
     });
 
-    expect(crm.calls).toHaveLength(1);
-    expect(crm.calls[0]).toMatchObject({ method: 'POST', path: '/roles' });
-    expect(crm.calls[0].body).toMatchObject({ name: 'Cajero' });
+    expect(crm.calls.filter((c) => c.method !== 'GET')).toHaveLength(1);
+    expect(crm.calls.filter((c) => c.method !== 'GET')[0]).toMatchObject({ method: 'POST', path: '/roles' });
+    expect(crm.calls.filter((c) => c.method !== 'GET')[0].body).toMatchObject({ name: 'Cajero' });
     expect(result.reply).toContain('Cajero');
     expect(result.pendingActions).toHaveLength(0);
   });
@@ -313,7 +315,7 @@ describe('Agent — escrituras con confirmación', () => {
       ctx,
     });
 
-    expect(crm.calls).toHaveLength(0);
+    expect(crm.calls.filter((c) => c.method !== 'GET')).toHaveLength(0);
     expect(result.reply).toContain('no lo creo');
     const resumeMessage = repos.__messages.filter((m) => m.role === 'user').at(-1)!;
     expect(JSON.stringify(resumeMessage.content)).toContain('rechaz');
@@ -352,7 +354,8 @@ describe('Agent — escrituras con confirmación', () => {
       ctx,
     });
     expect(afterSecond.reply).toBe('Hecho todo.');
-    expect(crm.calls.map((c) => c.path)).toEqual(['/roles', '/users/invite']);
+    // Las escrituras, en orden (las lecturas de la tarjeta de invitar no cuentan).
+    expect(crm.calls.filter((c) => c.method !== 'GET').map((c) => c.path)).toEqual(['/roles', '/users/invite']);
   });
 
   it('una escritura decidida dos veces se rechaza', async () => {
