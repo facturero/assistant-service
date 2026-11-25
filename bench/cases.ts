@@ -58,6 +58,8 @@ export interface AgentCase {
   decide?: boolean;
   /** Conversación previa (pregunta, respuesta), guardada tal cual antes del mensaje: para probar historiales largos. */
   history?: Array<[string, string]>;
+  /** Permisos del rol de quien pregunta, como los da `/auth/me`. Sin poner, todos (como antes de filtrar). */
+  permissions?: string[];
   check(result: TurnResult, crm: FixtureCrm, first: TurnResult): Check[];
 }
 
@@ -1011,6 +1013,23 @@ export const CASES: BenchCase[] = [
       check('no escribió nada', !crm.calls.some((c) => c.method !== 'GET')),
       check('no lo da por creado', !/(he creado|cre[eé] el rol|rol (fue |ha sido )?creado|listo[,.!])/i.test(r.reply), r.reply.slice(0, 160)),
       check('no vuelve a proponer', r.pendingActions.length === 0),
+      // El resultado del rechazo era una frase para el modelo y Qwen la copiaba (2026-11-25).
+      check('no copia el texto interno', !/(la persona|no la vuelvas|no es necesario volver)/i.test(r.reply), r.reply.slice(0, 160)),
+    ],
+  },
+  {
+    kind: 'agent',
+    id: 'sin-permiso',
+    description: 'Un rol de solo clientes y productos pide invitar a alguien: sin herramienta, decir que no tiene acceso y no mandarlo a una pantalla.',
+    message: 'Invita a demo@noahsolutionia.com como vendedor.',
+    permissions: ['customer:read', 'product:read'],
+    routes: { 'GET /customers': () => ok([]), 'GET /products': () => ok([]) },
+    check: (r) => [
+      check('no propone nada', r.pendingActions.length === 0),
+      check('dice que no tiene acceso', /(acceso|permiso)/i.test(r.reply), r.reply.slice(0, 160)),
+      check('remite a quien administra', /administr/i.test(r.reply), r.reply.slice(0, 160)),
+      check('no manda a una pantalla', !/\]\(\/(employees|users|roles)/.test(r.reply), r.reply.slice(0, 160)),
+      enEspanol(r.reply),
     ],
   },
   {

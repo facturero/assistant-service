@@ -190,12 +190,13 @@ async function runCase(target: Target, c: BenchCase, round: number, timeoutMs: n
         }
         conversationId = conversation.id;
       }
-      const first: TurnResult = await agent.startOrContinue({ conversationId, text: c.message, ctx: turnCtx });
+      const ctx = c.permissions ? { ...turnCtx, permissions: c.permissions } : turnCtx;
+      const first: TurnResult = await agent.startOrContinue({ conversationId, text: c.message, ctx });
       let result = first;
       const steps = [first];
       // Pulsar la tarjeta que pida el caso, una por una, hasta que no quede ninguna (máx. 4: ningún caso propone más).
       for (let i = 0; c.decide !== undefined && result.pendingActions.length > 0 && i < 4; i++) {
-        result = await agent.decideAction({ actionId: result.pendingActions[0]!.id, approve: c.decide, ctx: turnCtx });
+        result = await agent.decideAction({ actionId: result.pendingActions[0]!.id, approve: c.decide, ctx });
         steps.push(result);
       }
       output = steps

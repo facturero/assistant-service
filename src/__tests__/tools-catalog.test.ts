@@ -10,7 +10,9 @@ describe('catálogo de herramientas — qué se le ofrece al modelo', () => {
 
   it('solo las de los módulos activos y los permisos del rol', () => {
     const ofrecidas = names(availableTools(['customer:read'], new Set(['crm.contacts'])));
-    expect(ofrecidas).toEqual(expect.arrayContaining(['listar_clientes', 'ver_cliente', 'listar_tipos_identificacion', 'ver_organizacion', 'listar_permisos']));
+    expect(ofrecidas).toEqual(expect.arrayContaining(['listar_clientes', 'ver_cliente', 'listar_tipos_identificacion', 'listar_permisos']));
+    // GET /organizations/me exige organization:read: sin él, el CRM respondía 403.
+    expect(ofrecidas).not.toContain('ver_organizacion');
     // Sin el módulo de facturación ni el de cobranza:
     expect(ofrecidas).not.toContain('listar_facturas');
     expect(ofrecidas).not.toContain('cuentas_por_cobrar');

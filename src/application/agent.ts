@@ -83,7 +83,17 @@ const WRITE_PROMPT_AGAIN =
   'No pidas confirmación en texto: el sistema ya se la pide a la persona con un botón antes de ejecutar nada. ' +
   'Si la petición requiere hacer algo (invitar, crear, dar de alta), llama a la herramienta ' +
   'correspondiente en este mismo turno. No lo anuncies solo en texto. Si no tienes ninguna ' +
-  'herramienta para eso (por ejemplo, emitir una factura), no la inventes: di que no puedes hacerlo.';
+  'herramienta para eso (por ejemplo, emitir una factura), no la inventes: di que no puedes hacerlo. ' +
+  // Sin estas dos frases, Qwen abría la respuesta con «Tienes razón.» (le hablaba a la corrección, no a la persona) y, si
+  // le faltaba un dato, se ponía a razonar hasta gastar todos los tokens y devolvía vacío (banco, 2026-11-25).
+  'Si te falta un dato obligatorio, pregúntaselo a la persona en una frase. ' +
+  'Responde directamente a la persona: no menciones esta corrección ni le des la razón.';
+
+/**
+ * Lo que se le dice a la persona si el modelo cierra sin texto (p. ej. se le fueron todos los tokens razonando). Mejor una
+ * frase que una burbuja vacía tras un minuto de espera.
+ */
+const EMPTY_REPLY = 'No pude terminar la respuesta. Prueba a preguntarlo de otra forma o con más detalle.';
 
 function announcesWrite(text: string): boolean {
   return WRITE_ANNOUNCEMENT_RE.test(text) || WRITE_CONFIRMATION_RE.test(text);
@@ -294,6 +304,8 @@ export class Agent {
     // usuario que luego se reenvíe para siempre.
     let correction: string | null = null;
     let corrections = 0;
+    // El último texto que el modelo escribió en este turno: si tras una corrección cierra sin texto, se devuelve este.
+    let lastText = '';
 
     // Lo que queda para el historial: la ventana menos la respuesta, el prompt y las herramientas, que viajan siempre.
     const budget =
@@ -378,11 +390,12 @@ export class Agent {
         if (corrections < MAX_WRITE_RETRIES && announcesWrite(assistantMessage.text)) {
           correction = WRITE_PROMPT_AGAIN;
           corrections += 1;
+          lastText = assistantMessage.text;
           continue;
         }
         return {
           conversationId: conversation.id,
-          reply: assistantMessage.text,
+          reply: assistantMessage.text.trim() ? assistantMessage.text : lastText || EMPTY_REPLY,
           pendingActions: [],
           truncated: false,
           contextTrimmed: stage === 'dropped',
@@ -611,7 +624,9 @@ function resultBlock(toolUseId: string, content: unknown, isError = false): Cont
 function actionOutcome(action: PendingAction): unknown {
   if (action.status === 'executed') return { confirmado: true, resultado: action.result };
   if (action.status === 'rejected') {
-    return { confirmado: false, motivo: 'La persona rechazó la acción. No la vuelvas a proponer salvo que te lo pida.' };
+    // Un dato, no una instrucción redactada: con una frase para el modelo («No la vuelvas a proponer…») Qwen la copiaba
+    // tal cual en la respuesta (2026-11-25). La regla de no reproponerla vive en el prompt.
+    return { confirmado: false, rechazada: true };
   }
   return { confirmado: false, error: action.result };
 }

@@ -389,6 +389,9 @@ export const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'ver_organizacion',
+    // organization-service exige `organization:read` en GET /organizations/me: sin declararlo se le ofrecía a todos y quien no
+    // lo tiene recibía un 403 (visto en producción el 2026-11-25 con un rol de solo clientes y productos).
+    permission: 'organization:read',
     description: 'Datos de la organización activa: razón social, identificación tributaria y país.',
     risk: 'read',
     method: 'GET',
@@ -409,6 +412,8 @@ export const TOOLS: ToolDefinition[] = [
   {
     name: 'listar_tipos_identificacion',
     plugin: 'crm.contacts',
+    // customer-service exige `customer:read` en GET /identification-types.
+    permission: 'customer:read',
     description:
       'Tipos de identificación válidos en el país de la empresa (cédula, RUC, pasaporte…), con su id. Úsalo para elegir identificationTypeId antes de crear un cliente.',
     risk: 'read',

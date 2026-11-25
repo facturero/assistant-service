@@ -242,6 +242,30 @@ describe('Agent — escrituras con confirmación', () => {
     expect(llm.calls).toHaveLength(1);
   });
 
+  it('si tras la corrección el modelo cierra sin texto, se devuelve lo que había dicho (no una burbuja vacía)', async () => {
+    // Banco, 2026-11-25: «No lo encontré, ¿quieres que lo registre?» disparaba la corrección; Qwen razonaba hasta gastar los
+    // tokens y devolvía vacío tras un minuto.
+    const pregunta = 'No encontré el Cemento Holcim en el catálogo. ¿Quieres que lo registre como producto nuevo?';
+    const llm = new ScriptedLlm([{ content: [textBlock(pregunta)] }, { content: [] }]);
+    const r = await new Agent(createInMemoryRepositories(), llm, new FakeCrmApi(), options).startOrContinue({
+      conversationId: null,
+      text: '¿Cuántos sacos de Cemento Holcim nos quedan?',
+      ctx,
+    });
+    expect(r.reply).toBe(pregunta);
+    expect(JSON.stringify(llm.calls[1]!.messages)).toContain('no menciones esta corrección');
+  });
+
+  it('si el modelo cierra sin texto y no hay nada anterior, se dice que no pudo terminar', async () => {
+    const llm = new ScriptedLlm([{ content: [] }]);
+    const r = await new Agent(createInMemoryRepositories(), llm, new FakeCrmApi(), options).startOrContinue({
+      conversationId: null,
+      text: 'hola',
+      ctx,
+    });
+    expect(r.reply).toMatch(/No pude terminar/);
+  });
+
   it('no ejecuta una escritura: la propone y para', async () => {
     const repos = createInMemoryRepositories();
     const crm = new FakeCrmApi();
@@ -319,6 +343,8 @@ describe('Agent — escrituras con confirmación', () => {
     expect(result.reply).toContain('no lo creo');
     const resumeMessage = repos.__messages.filter((m) => m.role === 'user').at(-1)!;
     expect(JSON.stringify(resumeMessage.content)).toContain('rechaz');
+    // Un dato, no una frase: el modelo copiaba la frase en su respuesta.
+    expect(JSON.stringify(resumeMessage.content)).not.toContain('No la vuelvas');
   });
 
   it('con dos escrituras en un turno, no reanuda hasta que se deciden las dos', async () => {
