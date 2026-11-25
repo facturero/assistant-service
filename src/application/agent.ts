@@ -420,6 +420,20 @@ export class Agent {
       };
     }
 
+    if (tool.execute) {
+      const api = {
+        call: (method: 'GET' | 'POST' | 'PATCH' | 'PUT', path: string, options: { query?: Record<string, string>; body?: unknown } = {}) => {
+          // Una compuesta tampoco puede escribir en facturación: la barrera de arriba mira la ruta de cada llamada real.
+          if (isBillingWrite(method, path)) {
+            return Promise.resolve({ ok: false, status: 403, body: { code: 'ASSISTANT_CANNOT_INVOICE' } });
+          }
+          return this.crm.call({ method, path, query: options.query ?? {}, body: options.body, bearerToken: ctx.bearerToken });
+        },
+      };
+      const response = await tool.execute(input, api);
+      return response.ok && tool.trim ? { ...response, body: tool.trim(response.body) } : response;
+    }
+
     let path = tool.path;
     const body: Record<string, unknown> = {};
     const query: Record<string, string> = {};

@@ -37,6 +37,17 @@ export function isBillingWrite(method: string, path: string): boolean {
   return BILLING_PATH_PREFIXES.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
 }
 
+export interface ToolResponse {
+  ok: boolean;
+  status: number;
+  body: unknown;
+}
+
+/** La API del CRM tal como la ve una herramienta compuesta: el token del usuario ya va puesto. */
+export interface ToolApi {
+  call(method: 'GET' | 'POST' | 'PATCH' | 'PUT', path: string, options?: { query?: Record<string, string>; body?: unknown }): Promise<ToolResponse>;
+}
+
 export interface ToolDefinition {
   name: string;
   description: string;
@@ -61,6 +72,13 @@ export interface ToolDefinition {
    */
   plugin?: string;
   permission?: string;
+  /**
+   * Herramienta compuesta: en vez de mandar el input tal cual a `method path`, arma la respuesta con una o varias llamadas a
+   * la API, siempre con el token del usuario (`api.call`). Sirve para lo que el modelo hacía mal o lento: ordenar (los
+   * «más caros»), juntar dos consultas en una (stock con el nombre del producto, antes una llamada por producto) o adaptar
+   * el cuerpo a lo que la API exige (precio en texto, moneda, establecimientos). Lo que devuelve pasa luego por `trim`.
+   */
+  execute?: (input: Record<string, unknown>, api: ToolApi) => Promise<ToolResponse>;
   /**
    * Frase en primera persona que se le enseña al usuario antes de confirmar.
    * Se escribe aquí y no se le pide al modelo: lo que se confirma tiene que
@@ -204,20 +222,39 @@ export const TOOLS: ToolDefinition[] = [
     name: 'listar_productos',
     plugin: 'infra.catalog_products',
     permission: 'product:read',
-    description: 'Lista los productos del catálogo. Admite búsqueda por texto y filtro por estado.',
+    description:
+      'Lista los productos del catálogo con su precio. Admite búsqueda, estado y orden. Para «los más caros» o «los más baratos» usa orden precio_desc o precio_asc: vienen ya ordenados, no los ordenes tú.',
     risk: 'read',
     method: 'GET',
     path: '/products',
-    queryParams: ['search', 'status', 'limit'],
     inputSchema: {
       type: 'object',
       properties: {
         search: str('Texto a buscar en el nombre o el código del producto'),
         status: { type: 'string', enum: ['active', 'inactive'], description: 'Estado del producto' },
-        limit: num('Máximo de resultados (por defecto 20)'),
+        orden: { type: 'string', enum: ['precio_desc', 'precio_asc', 'nombre'], description: 'Orden de la lista (por defecto nombre)' },
+        limit: num('Máximo de resultados (por defecto 50)'),
       },
       additionalProperties: false,
     },
+    // La API devuelve el catálogo entero y sin orden. Ordenar lo hace el servidor: el modelo se saltó un producto al
+    // elegir «los 6 más caros» él mismo (prueba en producción, 2026-11-25).
+    execute: async (input, api) => {
+      const query: Record<string, string> = {};
+      if (typeof input.search === 'string' && input.search) query.search = input.search;
+      if (input.status === 'active' || input.status === 'inactive') query.status = input.status;
+      const r = await api.call('GET', '/products', { query });
+      if (!r.ok || !Array.isArray(r.body)) return r;
+      const cents = (p: Record<string, any>) => Number(p.priceCents ?? 0);
+      const rows = [...(r.body as Record<string, any>[])];
+      if (input.orden === 'precio_desc') rows.sort((a, b) => cents(b) - cents(a));
+      else if (input.orden === 'precio_asc') rows.sort((a, b) => cents(a) - cents(b));
+      else rows.sort((a, b) => String(a.name ?? '').localeCompare(String(b.name ?? ''), 'es'));
+      const limit = typeof input.limit === 'number' && input.limit > 0 ? Math.floor(input.limit) : 50;
+      return { ...r, body: { items: rows.slice(0, limit), total: rows.length } };
+    },
+    trim: (body) =>
+      mapList(body, (p) => ({ id: p.id, nombre: p.name, codigo: p.sku, tipo: p.type, estado: p.status, precio: usd(p.priceCents) })),
   },
   {
     name: 'listar_facturas',
@@ -510,26 +547,61 @@ export const TOOLS: ToolDefinition[] = [
     },
   },
   {
-    name: 'stock_bajo',
+    name: 'stock_por_producto',
     plugin: 'inventory.kardex',
     permission: 'inventory:read',
-    description: 'Productos con poco stock o sin stock, por bodega. Para ver un producto concreto usa stock_producto.',
+    description:
+      'Existencias de TODOS los productos en una sola consulta: por producto, con su nombre y sumando todas las bodegas. Filtra por poco stock o agotados. Para el detalle por bodega de un producto concreto usa stock_producto.',
     risk: 'read',
     method: 'GET',
     path: '/stock',
-    queryParams: ['lowStock', 'stockState', 'warehouseId', 'pageSize'],
     inputSchema: {
       type: 'object',
       properties: {
         lowStock: { type: 'boolean', description: 'Solo los que están bajo su mínimo' },
         stockState: { type: 'string', enum: ['with_stock', 'without_stock'], description: 'without_stock = agotados' },
-        warehouseId: str('Id de la bodega (de listar_bodegas)'),
-        pageSize: num('Máximo de resultados (por defecto 30)'),
+        warehouseId: str('Id de la bodega (de listar_bodegas), para una sola bodega'),
       },
       additionalProperties: false,
     },
-    trim: (body) =>
-      mapList(body, (p) => pick(p, ['productId', 'warehouseCode', 'quantityOnHand', 'quantityReserved', 'quantityAvailable'])),
+    // Dos llamadas en vez de una por producto: «¿cuánto stock tengo de cada producto?» tardaba 22 s con 12 productos
+    // (prueba en producción, 2026-11-25). Las cantidades se suman aquí, no en el modelo.
+    execute: async (input, api) => {
+      const query: Record<string, string> = { pageSize: '200' };
+      if (input.lowStock === true) query.lowStock = 'true';
+      if (input.stockState === 'with_stock' || input.stockState === 'without_stock') query.stockState = input.stockState;
+      if (typeof input.warehouseId === 'string' && input.warehouseId) query.warehouseId = input.warehouseId;
+      const [stock, products] = await Promise.all([api.call('GET', '/stock', { query }), api.call('GET', '/products')]);
+      if (!stock.ok) return stock;
+      const positions: Record<string, any>[] = Array.isArray((stock.body as any)?.data) ? (stock.body as any).data : [];
+      const names = new Map(
+        (products.ok && Array.isArray(products.body) ? (products.body as Record<string, any>[]) : []).map((p) => [String(p.id), String(p.name)]),
+      );
+      const byProduct = new Map<string, { producto: string; disponible: number; reservado: number; total: number; bodegas: number }>();
+      for (const p of positions) {
+        const id = String(p.productId);
+        const row = byProduct.get(id) ?? { producto: names.get(id) ?? id, disponible: 0, reservado: 0, total: 0, bodegas: 0 };
+        row.disponible += Number(p.quantityAvailable ?? 0);
+        row.reservado += Number(p.quantityReserved ?? 0);
+        row.total += Number(p.quantityOnHand ?? 0);
+        row.bodegas += 1;
+        byProduct.set(id, row);
+      }
+      const round = (n: number) => Math.round(n * 10_000) / 10_000;
+      const items = [...byProduct.values()]
+        .map((r) => ({ ...r, disponible: round(r.disponible), reservado: round(r.reservado), total: round(r.total) }))
+        .sort((a, b) => a.producto.localeCompare(b.producto, 'es'));
+      const total = Number((stock.body as any)?.total ?? positions.length);
+      return {
+        ok: true,
+        status: 200,
+        body: {
+          items,
+          total: items.length,
+          ...(total > positions.length ? { aviso: `Hay ${total} posiciones de stock y aquí van ${positions.length}: filtra por bodega o por estado.` } : {}),
+        },
+      };
+    },
   },
   {
     name: 'listar_bodegas',
@@ -786,7 +858,7 @@ export const TOOLS: ToolDefinition[] = [
     plugin: 'crm.contacts',
     permission: 'customer:create',
     description:
-      'Da de alta un cliente. Comprueba antes con listar_clientes que no exista ya uno con la misma identificación.',
+      'Da de alta un cliente. Comprueba antes con listar_clientes que no exista ya uno con la misma identificación. type es company para una empresa (RUC de sociedad) y person para una persona.',
     risk: 'write',
     method: 'POST',
     path: '/customers',
@@ -794,22 +866,25 @@ export const TOOLS: ToolDefinition[] = [
       type: 'object',
       properties: {
         businessName: str('Nombre o razón social'),
+        type: { type: 'string', enum: ['person', 'company'], description: 'person = persona; company = empresa' },
         identification: str('Número de identificación (cédula, RUC, pasaporte)'),
         identificationTypeId: str('Tipo de identificación, de listar_tipos_identificacion'),
         email: str('Correo de contacto'),
         phone: str('Teléfono de contacto'),
       },
-      required: ['businessName'],
+      // `type` lo exige customer-service: sin él, confirmar daba siempre 422 (revisado contra su validador, 2026-11-25).
+      required: ['businessName', 'type'],
       additionalProperties: false,
     },
     summarize: (input) =>
-      `Crear el cliente "${input.businessName}"${input.identification ? ` con identificación ${input.identification}` : ''}`,
+      `Crear el cliente "${input.businessName}" (${input.type === 'company' ? 'empresa' : 'persona'})${input.identification ? ` con identificación ${input.identification}` : ''}`,
   },
   {
     name: 'crear_producto',
     plugin: 'infra.catalog_products',
     permission: 'product:create',
-    description: 'Da de alta un producto en el catálogo.',
+    description:
+      'Da de alta un producto en el catálogo, disponible en todos los establecimientos. type es good para un bien físico y service para un servicio. El precio va en centavos.',
     risk: 'write',
     method: 'POST',
     path: '/products',
@@ -819,14 +894,36 @@ export const TOOLS: ToolDefinition[] = [
         name: str('Nombre del producto'),
         description: str('Descripción del producto'),
         priceCents: num('Precio en centavos, sin decimales. 10 dólares son 1000'),
-        type: { type: 'string', enum: ['product', 'service'], description: 'Producto o servicio' },
+        type: { type: 'string', enum: ['good', 'service'], description: 'good = bien físico; service = servicio' },
       },
-      required: ['name', 'priceCents'],
+      required: ['name', 'priceCents', 'type'],
       additionalProperties: false,
+    },
+    // product-service exige `price` en texto con dos decimales, `currencyCode` y al menos un establecimiento; el input
+    // directo (priceCents, sin moneda ni establecimientos) daba siempre 422 al confirmar (revisado contra su validador,
+    // 2026-11-25). El modelo sigue dando el precio en centavos (sin decimales que confundir) y la conversión se hace aquí.
+    execute: async (input, api) => {
+      const est = await api.call('GET', '/establishments');
+      if (!est.ok) return est;
+      const list = Array.isArray(est.body) ? (est.body as Record<string, any>[]) : Array.isArray((est.body as any)?.items) ? (est.body as any).items : [];
+      const establishmentIds = list.filter((e: Record<string, any>) => e.status !== 'inactive').map((e: Record<string, any>) => String(e.id));
+      if (establishmentIds.length === 0) {
+        return { ok: false, status: 422, body: { code: 'NO_ESTABLISHMENTS', message: 'La empresa no tiene establecimientos activos donde ofrecer el producto.' } };
+      }
+      return api.call('POST', '/products', {
+        body: {
+          name: input.name,
+          type: input.type === 'service' ? 'service' : 'good',
+          price: (Number(input.priceCents) / 100).toFixed(2),
+          currencyCode: 'USD',
+          establishmentIds,
+          ...(typeof input.description === 'string' && input.description ? { description: input.description } : {}),
+        },
+      });
     },
     summarize: (input) => {
       const price = typeof input.priceCents === 'number' ? (input.priceCents / 100).toFixed(2) : '?';
-      return `Crear el producto "${input.name}" con precio ${price}`;
+      return `Crear el ${input.type === 'service' ? 'servicio' : 'producto'} "${input.name}" con precio ${price}, en todos los establecimientos`;
     },
   },
 ];
