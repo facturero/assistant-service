@@ -308,8 +308,9 @@ export class Agent {
 
   /** El bucle propiamente dicho. */
   private async run(conversation: Conversation, ctx: TurnContext): Promise<TurnResult> {
-    const system = buildSystemPrompt(ctx.organization);
-    const tools = toAnthropicTools(availableTools(ctx.permissions ?? null, ctx.plugins ?? null));
+    const offered = availableTools(ctx.permissions ?? null, ctx.plugins ?? null);
+    const system = buildSystemPrompt(ctx.organization, offered.map((t) => t.name));
+    const tools = toAnthropicTools(offered);
 
     // La corrección se inyecta a la llamada siguiente y se reemplaza cada vuelta.
     // No viaja en el historial: es un empujón a la iteración, no un mensaje del

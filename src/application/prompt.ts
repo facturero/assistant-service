@@ -73,7 +73,51 @@ Cuando mandes a la persona a hacer algo en otra pantalla, o nombres algo que aca
 - Bitácora de auditoría: /audit-logs
 - Ajustes: /settings`;
 
-export function buildSystemPrompt(ctx: OrganizationContext): string {
+/**
+ * Cada herramienta en palabras de la persona, para decirle al modelo qué puede hacer EN ESTA SESIÓN. Sin esto, a «¿qué
+ * puedes hacer?» respondía con todo el catálogo aunque el rol de la persona solo leyera clientes y productos (producción,
+ * 2026-11-25): ofrecía facturas, invitar empleados o inventario que esa persona no tiene. Varias herramientas comparten
+ * frase; un test exige que toda herramienta tenga la suya.
+ */
+export const TOOL_CAPABILITIES: Record<string, string> = {
+  listar_clientes: 'consultar clientes',
+  ver_cliente: 'consultar clientes',
+  listar_tipos_identificacion: 'consultar clientes',
+  listar_productos: 'consultar productos y precios',
+  listar_facturas: 'consultar facturas y ventas',
+  resumen_ventas: 'consultar facturas y ventas',
+  listar_empleados: 'consultar empleados y roles',
+  listar_roles: 'consultar empleados y roles',
+  listar_permisos: 'consultar el catálogo de permisos',
+  ver_organizacion: 'consultar los datos de la empresa',
+  listar_establecimientos: 'consultar establecimientos y puntos de emisión',
+  cuentas_por_cobrar: 'consultar la cobranza y los estados de cuenta de clientes',
+  antiguedad_cobranza: 'consultar la cobranza y los estados de cuenta de clientes',
+  estado_cuenta_cliente: 'consultar la cobranza y los estados de cuenta de clientes',
+  cuentas_por_pagar: 'consultar lo que se debe a proveedores',
+  antiguedad_pagos: 'consultar lo que se debe a proveedores',
+  stock_producto: 'consultar inventario y bodegas',
+  stock_por_producto: 'consultar inventario y bodegas',
+  listar_bodegas: 'consultar inventario y bodegas',
+  listar_proveedores: 'consultar proveedores',
+  listar_ordenes_compra: 'consultar órdenes y facturas de compra',
+  listar_facturas_compra: 'consultar órdenes y facturas de compra',
+  mis_tareas: 'consultar sus tareas de proyectos',
+  estado_resultados: 'consultar el estado de resultados y el balance',
+  balance_general: 'consultar el estado de resultados y el balance',
+  buscar_bitacora: 'consultar la bitácora de auditoría',
+  crear_rol: 'crear roles (con su confirmación)',
+  invitar_empleado: 'invitar empleados (con su confirmación)',
+  crear_cliente: 'dar de alta clientes (con su confirmación)',
+  crear_producto: 'dar de alta productos (con su confirmación)',
+};
+
+/** Frases únicas, en el orden del catálogo, de las herramientas que se le ofrecen al modelo en esta sesión. */
+export function capabilitiesFor(toolNames: string[]): string[] {
+  return [...new Set(toolNames.map((n) => TOOL_CAPABILITIES[n]).filter((c): c is string => !!c))];
+}
+
+export function buildSystemPrompt(ctx: OrganizationContext, toolNames?: string[]): string {
   const lines = [
     BASE_PROMPT,
     '',
@@ -85,5 +129,17 @@ export function buildSystemPrompt(ctx: OrganizationContext): string {
     `- Idioma de la interfaz: ${ctx.locale}`,
     `- Fecha de hoy: ${ctx.today}`,
   ];
+  if (toolNames) {
+    const caps = capabilitiesFor(toolNames);
+    lines.push(
+      '',
+      '## Lo que puedes hacer en esta sesión',
+      '',
+      caps.length
+        ? `Con los permisos de esta persona y los módulos de su empresa puedes: ${caps.join('; ')}.`
+        : 'Con los permisos de esta persona no tienes herramientas: solo puedes conversar y orientar.',
+      'Si te pregunta qué puedes hacer, cuenta solo esto (y que puedes mostrarlo en tabla o gráfico si te lo pide). No ofrezcas ni pongas de ejemplo nada que no esté en esta lista: su usuario no tiene acceso.',
+    );
+  }
   return lines.join('\n');
 }

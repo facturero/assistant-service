@@ -1034,6 +1034,21 @@ export const CASES: BenchCase[] = [
   },
   {
     kind: 'agent',
+    id: 'que-puedes-hacer-limitado',
+    description: 'Un rol de solo clientes y productos pregunta qué puede hacer: contar solo eso, sin ofrecer lo que no tiene.',
+    message: '¿Qué puedes hacer por mí? Dame ejemplos de preguntas.',
+    permissions: ['customer:read', 'product:read'],
+    routes: {},
+    check: (r) => [
+      check('habla de clientes', /cliente/i.test(r.reply)),
+      check('habla de productos', /producto/i.test(r.reply)),
+      check('no ofrece lo que no tiene', !/(factur|invit|inventario|bodega|bit[aá]cora|compra|cobranza|proveedor)/i.test(r.reply), r.reply.slice(0, 200)),
+      check('no propone escrituras', r.pendingActions.length === 0),
+      enEspanol(r.reply),
+    ],
+  },
+  {
+    kind: 'agent',
     id: 'fallo-historial-largo',
     description: 'Una conversación más larga que la ventana (16k): compactar y responder bien, no un 400.',
     message: '¿Cuánto facturamos en octubre de 2026?',
