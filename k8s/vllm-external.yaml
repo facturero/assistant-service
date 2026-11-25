@@ -58,15 +58,14 @@ spec:
       targetPort: 8000
       protocol: TCP
 ---
-# La 5070 todavía no está en la red (2026-11-24): la lista va VACÍA a propósito.
-# Un Service sin direcciones rechaza la conexión al instante, el asistente marca
-# la 5070 como caída y atiende la 4070 sin esperar ningún timeout. El día que
-# llegue, con IP fija o reservada en el router (el PC de Ollama ya falló por el
-# DHCP, EHOSTUNREACH, 2026-11-10), se cambia por:
+# IP de la 5070. Tiene que estar fija o reservada en el router (el PC de Ollama
+# ya falló por el DHCP, EHOSTUNREACH, 2026-11-10). Con `endpoints: []` el
+# asistente marca la 5070 como caída al instante y atiende solo la 4070.
 #
-#   endpoints:
-#     - addresses:
-#         - "192.168.100.X"
+# En esta 5070 (2026-11-25) el comando de arriba NO arranca con 0.85: la caché
+# KV queda en 0,58 GiB y hacen falta 0,67. Corre con
+# `--gpu-memory-utilization 0.88`: 17.246 tokens de caché (~1,05 conversaciones
+# de 16384 a la vez, frente a ~1,7 en la 4070).
 apiVersion: discovery.k8s.io/v1
 kind: EndpointSlice
 metadata:
@@ -78,4 +77,6 @@ ports:
   - name: http
     port: 8000
     protocol: TCP
-endpoints: []
+endpoints:
+  - addresses:
+      - "192.168.100.130"
