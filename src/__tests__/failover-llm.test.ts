@@ -98,3 +98,33 @@ describe('FailoverLlm', () => {
     expect(llm.current()).toBe('4070');
   });
 });
+
+describe('FailoverLlm.status — lo que el chat usa para dejar o no escribir', () => {
+  it('antes del primer sondeo se da por disponible: no cerrar el chat por no saber', () => {
+    expect(montar().llm.status()).toEqual({ available: true, servers: 2, healthy: 2, checkedAt: null });
+  });
+
+  it('con la 5070 caída sigue disponible: atiende la 4070', async () => {
+    const { llm } = montar({ 'http://vllm/models': false, 'http://vllm-4070/models': true });
+    await llm.probeAll();
+    expect(llm.status()).toMatchObject({ available: true, servers: 2, healthy: 1 });
+    expect(llm.status().checkedAt).not.toBeNull();
+  });
+
+  it('con las dos caídas no está disponible, y vuelve en cuanto una responde', async () => {
+    const { llm, salud } = montar({ 'http://vllm/models': false, 'http://vllm-4070/models': false });
+    await llm.probeAll();
+    expect(llm.status()).toMatchObject({ available: false, healthy: 0 });
+    salud['http://vllm-4070/models'] = true;
+    await llm.probeAll();
+    expect(llm.status()).toMatchObject({ available: true, healthy: 1 });
+  });
+
+  it('una petición que encuentra los dos caídos también lo marca, sin esperar al sondeo', async () => {
+    const { llm, r5070, r4070 } = montar();
+    r5070.behave = 'down';
+    r4070.behave = 'down';
+    await expect(llm.complete(turno)).rejects.toBeInstanceOf(LlmEndpointDownError);
+    expect(llm.status().available).toBe(false);
+  });
+});

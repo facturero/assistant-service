@@ -1,4 +1,4 @@
-import { LlmMessage, LlmPort, LlmTurn, StructuredLlmPort } from '../../application/ports';
+import { LlmHealthPort, LlmHealthStatus, LlmMessage, LlmPort, LlmTurn, StructuredLlmPort } from '../../application/ports';
 import { LlmEndpointDownError } from './compatible-llm';
 
 /**
@@ -27,9 +27,10 @@ export interface FailoverOptions {
   log?: (message: string) => void;
 }
 
-export class FailoverLlm implements LlmPort, StructuredLlmPort {
+export class FailoverLlm implements LlmPort, StructuredLlmPort, LlmHealthPort {
   /** `true` hasta que algo diga lo contrario: al arrancar no se sabe y lo sensato es intentar con el preferido. */
   private readonly healthy: boolean[];
+  private checkedAt: Date | null = null;
   private timer: NodeJS.Timeout | null = null;
   private readonly fetchFn: typeof fetch;
   private readonly log: (message: string) => void;
@@ -78,6 +79,13 @@ export class FailoverLlm implements LlmPort, StructuredLlmPort {
 
   async probeAll(): Promise<void> {
     await Promise.all(this.endpoints.map((e, i) => this.probe(e, i)));
+    this.checkedAt = new Date();
+  }
+
+  /** Disponible si responde al menos uno: con la 5070 caída, la 4070 sigue atendiendo y el chat no tiene por qué cerrarse. */
+  status(): LlmHealthStatus {
+    const healthy = this.healthy.filter(Boolean).length;
+    return { available: healthy > 0, servers: this.endpoints.length, healthy, checkedAt: this.checkedAt?.toISOString() ?? null };
   }
 
   /** Los sanos primero, en su orden; detrás, los caídos, por si el sondeo se equivocó o todos están caídos. */

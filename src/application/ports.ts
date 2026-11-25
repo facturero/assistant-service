@@ -48,6 +48,24 @@ export interface StructuredLlmPort {
 }
 
 /**
+ * ¿Hay algún servidor del modelo respondiendo? El chat lo consulta para no dejar escribir cuando todos están caídos: el
+ * historial se puede seguir leyendo (vive en la base, no en el modelo), pero un mensaje nuevo fallaría a los segundos.
+ * Solo da números, nunca las direcciones de los servidores: eso no le sirve al navegador.
+ */
+export interface LlmHealthPort {
+  status(): LlmHealthStatus;
+}
+
+export interface LlmHealthStatus {
+  available: boolean;
+  /** Servidores sondeados y cuántos responden. 0 y 0 con un proveedor externo (Anthropic), que no se sondea. */
+  servers: number;
+  healthy: number;
+  /** Último sondeo terminado, ISO. `null` si todavía no hubo ninguno. */
+  checkedAt: string | null;
+}
+
+/**
  * La API del CRM vista desde el asistente. La implementación llama al gateway
  * con el JWT del usuario, que es lo que hace que los permisos y el aislamiento
  * por organización se apliquen solos.

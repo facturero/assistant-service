@@ -12,6 +12,7 @@ import { CrmApi } from './infrastructure/http/crm-api.js';
 import { initModels } from './infrastructure/persistence/models.js';
 import { createRepositories } from './infrastructure/persistence/repositories.js';
 import { createApp } from './interface/http/app.js';
+import type { LlmHealthPort } from './application/ports.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -32,16 +33,18 @@ async function main(): Promise<void> {
   // Dos protocolos, no dos clientes por capricho: 'anthropic' y 'opencode'
   // hablan la Messages API y comparten adaptador; 'openai-compat' habla el
   // formato de OpenAI y necesita traducción. El agente no nota la diferencia.
+  const compat = provider.name === 'openai-compat' ? createOpenAiCompatLlm(config, provider) : null;
   const llm =
-    provider.name === 'openai-compat'
-      ? createOpenAiCompatLlm(config, provider)
-      : new ClaudeLlm({
-          apiKey: provider.apiKey,
-          baseURL: provider.baseURL,
-          model: provider.model,
-          effort: config.ANTHROPIC_EFFORT,
-          maxTokens: config.ANTHROPIC_MAX_TOKENS,
-        });
+    compat ??
+    new ClaudeLlm({
+      apiKey: provider.apiKey,
+      baseURL: provider.baseURL,
+      model: provider.model,
+      effort: config.ANTHROPIC_EFFORT,
+      maxTokens: config.ANTHROPIC_MAX_TOKENS,
+    });
+  // Un proveedor externo (Anthropic) no se sondea: si cae, el envío falla con 503 y el chat lo dice en ese momento.
+  const health: LlmHealthPort = compat ?? { status: () => ({ available: true, servers: 0, healthy: 0, checkedAt: null }) };
 
   const agent = new Agent(repos, llm, crm, {
     maxIterations: config.AGENT_MAX_ITERATIONS,
@@ -61,7 +64,7 @@ async function main(): Promise<void> {
     console.log('[assistant-service] RABBITMQ_URL no configurado: la auditoría queda en outbox_messages sin publicar.');
   }
 
-  const app = createApp({ agent, projects, repos, crm, corsOrigin: config.CORS_ORIGIN });
+  const app = createApp({ agent, projects, repos, crm, health, corsOrigin: config.CORS_ORIGIN });
   serve({ fetch: app.fetch, port: config.PORT });
 
   // Decir por dónde sale el modelo evita la tarde entera depurando por qué la

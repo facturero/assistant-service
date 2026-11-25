@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { Agent, TurnContext } from '../../application/agent';
 import { Repositories } from '../../domain/repositories';
 import { DomainError } from '../../domain/errors';
-import { CrmApiPort } from '../../application/ports';
+import { CrmApiPort, LlmHealthPort } from '../../application/ports';
 import { ProjectAiContext, ProjectAssistant } from '../../application/project-ai';
 
 interface Vars {
@@ -75,6 +75,8 @@ export function createApp(opts: {
   projects: ProjectAssistant;
   repos: Repositories;
   crm: CrmApiPort;
+  /** Si no viene (tests viejos), `/assistant/status` dice disponible: es lo que pasaba antes de existir la ruta. */
+  health?: LlmHealthPort;
   corsOrigin: string;
 }): Hono<Vars> {
   const app = new Hono<Vars>();
@@ -115,6 +117,15 @@ export function createApp(opts: {
   app.get('/health', (c) => c.json({ status: 'ok' }));
 
   app.use('/assistant/*', requireContext());
+
+  /**
+   * ¿Responde algún servidor del modelo? El chat lo pregunta al abrirse y cada poco mientras está abierto: si no hay
+   * ninguno, deshabilita el envío pero deja leer el historial, que no depende del modelo. Lee el último sondeo en memoria,
+   * no llama al modelo: es barato aunque lo pidan muchos navegadores a la vez.
+   */
+  app.get('/assistant/status', (c) =>
+    c.json(opts.health?.status() ?? { available: true, servers: 0, healthy: 0, checkedAt: null }),
+  );
 
   /** Hilos del usuario, para la lista lateral del chat. */
   app.get('/assistant/conversations', async (c) => {
