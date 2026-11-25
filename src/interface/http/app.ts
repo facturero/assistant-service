@@ -302,13 +302,20 @@ async function buildTurnContext(c: any, crm: CrmApiPort): Promise<TurnContext> {
   const profile = (me.ok ? me.body : {}) as Record<string, unknown>;
   const company = (org.ok ? org.body : {}) as Record<string, unknown>;
   const permissionsHeader = c.req.header('X-Permissions') as string | undefined;
+  // Por el proxy HTTP el gateway pone `X-Permissions`; por el socket (`assistant:send`/`assistant:decide`) no. `/auth/me`
+  // trae los mismos permisos (auth-service los copia del token), y ya se pide en cada turno: sin él, por el socket se le
+  // ofrecían al modelo herramientas que el CRM le iba a negar con 403. Se filtra por el token y no por la base porque el
+  // CRM autoriza por el token.
+  const profilePermissions = Array.isArray(profile.permissions)
+    ? (profile.permissions as unknown[]).filter((p): p is string => typeof p === 'string')
+    : null;
 
   return {
     organizationId: c.get('organizationId'),
     userId: c.get('userId'),
     bearerToken,
     locale,
-    permissions: permissionsHeader ? permissionsHeader.split(',').map((p) => p.trim()).filter(Boolean) : null,
+    permissions: permissionsHeader ? permissionsHeader.split(',').map((p) => p.trim()).filter(Boolean) : profilePermissions,
     plugins: activePlugins(plugins),
     organization: {
       // El nombre comercial es por el que la gente llama a su empresa; la razón

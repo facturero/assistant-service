@@ -88,12 +88,12 @@ export function createInMemoryRepositories(): Repositories & {
 
 /** Un modelo de mentira que devuelve los turnos que se le den, en orden. */
 export class ScriptedLlm implements LlmPort {
-  readonly calls: Array<{ system: string; messages: unknown[] }> = [];
+  readonly calls: Array<{ system: string; messages: unknown[]; tools?: Array<{ name: string }> }> = [];
 
   constructor(private readonly turns: Array<Partial<LlmTurn>>) {}
 
-  async complete(params: { system: string; messages: unknown[] }): Promise<LlmTurn> {
-    this.calls.push({ system: params.system, messages: params.messages });
+  async complete(params: { system: string; messages: unknown[]; tools?: Array<{ name: string }> }): Promise<LlmTurn> {
+    this.calls.push({ system: params.system, messages: params.messages, tools: params.tools });
     const turn = this.turns.shift();
     if (!turn) throw new Error('El test pidió más turnos de los que preparó');
     return {
