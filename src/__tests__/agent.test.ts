@@ -242,14 +242,27 @@ describe('Agent — escrituras con confirmación', () => {
     expect(llm.calls).toHaveLength(1);
   });
 
-  it('si tras la corrección el modelo cierra sin texto, se devuelve lo que había dicho (no una burbuja vacía)', async () => {
-    // Banco, 2026-11-25: «No lo encontré, ¿quieres que lo registre?» disparaba la corrección; Qwen razonaba hasta gastar los
-    // tokens y devolvía vacío tras un minuto.
+  it('si la persona solo preguntó, ofrecer crear lo que falta no dispara la corrección', async () => {
+    // Banco, 2026-11-25: «No lo encontré, ¿quieres que lo registre?» disparaba la corrección y el modelo acababa pidiendo el
+    // precio de un producto que nadie había pedido crear.
     const pregunta = 'No encontré el Cemento Holcim en el catálogo. ¿Quieres que lo registre como producto nuevo?';
-    const llm = new ScriptedLlm([{ content: [textBlock(pregunta)] }, { content: [] }]);
+    const llm = new ScriptedLlm([{ content: [textBlock(pregunta)] }]);
     const r = await new Agent(createInMemoryRepositories(), llm, new FakeCrmApi(), options).startOrContinue({
       conversationId: null,
       text: '¿Cuántos sacos de Cemento Holcim nos quedan?',
+      ctx,
+    });
+    expect(r.reply).toBe(pregunta);
+    expect(llm.calls).toHaveLength(1);
+  });
+
+  it('si tras la corrección el modelo cierra sin texto, se devuelve lo que había dicho (no una burbuja vacía)', async () => {
+    // Qwen razonaba hasta gastar los tokens y devolvía vacío tras un minuto (banco, 2026-11-25).
+    const pregunta = '¿Quieres que registre el Cemento Holcim como producto nuevo?';
+    const llm = new ScriptedLlm([{ content: [textBlock(pregunta)] }, { content: [] }]);
+    const r = await new Agent(createInMemoryRepositories(), llm, new FakeCrmApi(), options).startOrContinue({
+      conversationId: null,
+      text: 'Registra el Cemento Holcim como producto',
       ctx,
     });
     expect(r.reply).toBe(pregunta);

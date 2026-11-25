@@ -100,6 +100,18 @@ function announcesWrite(text: string): boolean {
 }
 
 /**
+ * ¿Pidió la persona hacer algo? La red de seguridad solo tiene sentido entonces. Si solo preguntó («¿cuántos sacos de
+ * cemento quedan?») y el modelo ofrece crear lo que falta («¿quieres que lo registre?»), la oferta es legítima: corregirla
+ * empujaba al modelo a crear un producto que nadie pidió (banco, 2026-11-25).
+ */
+const WRITE_REQUEST_RE =
+  /\b(?:invit\w*|cre[aáe]\w*|registr\w*|d[aá]\s+de\s+alta|dar\s+de\s+alta|agreg\w*|añad\w*|anad\w*|alta\s+(?:a|de)|nuev[oa]s?)\b/i;
+
+function asksForWrite(userText: string): boolean {
+  return WRITE_REQUEST_RE.test(userText);
+}
+
+/**
  * El bucle del agente.
  *
  * Es un bucle manual y no el ayudante del SDK por una razón concreta: aquí el
@@ -387,7 +399,7 @@ export class Agent {
         // sin emitir la llamada. Para una respuesta normal es el fin del turno,
         // pero si el texto promete una escritura, se da otra vuelta con la
         // corrección en vez de dar la acción por hecha.
-        if (corrections < MAX_WRITE_RETRIES && announcesWrite(assistantMessage.text)) {
+        if (corrections < MAX_WRITE_RETRIES && announcesWrite(assistantMessage.text) && asksForWrite(lastUserText)) {
           correction = WRITE_PROMPT_AGAIN;
           corrections += 1;
           lastText = assistantMessage.text;
